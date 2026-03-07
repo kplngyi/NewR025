@@ -5,10 +5,10 @@ import pandas as pd
 
 import argparse
 
-# parser = argparse.ArgumentParser()
-# parser.add_argument('--batch_size', type=int, default=64)
-# parser.add_argument('--epochs', type=int, default=30)
-# args = parser.parse_args()
+parser = argparse.ArgumentParser()
+parser.add_argument('--batch_size', type=int, default=64)
+parser.add_argument('--epochs', type=int, default=30)
+args = parser.parse_args()
 # 提取fnirs 的fif文件
 
 import os
@@ -16,11 +16,10 @@ import mne
 import numpy as np
 target_path = 'PPfNIRS'
 
-# 获取当前工作目录（你执行 python 脚本时所在的位置）
+# 切换到脚本所在目录，避免依赖历史环境中的绝对路径
 cwd = os.getcwd()
 print("当前工作目录是：", cwd)
-target_dir = "/home/siat_dy/Learn/LearnPy/ROBIO2025/"
-# 切换当前工作目录
+target_dir = os.path.dirname(os.path.abspath(__file__))
 os.chdir(target_dir)
 filesA1 = [os.path.join(target_path, f) for f in os.listdir(target_path) if f.endswith('.fif') and 'A1' in f] 
 filesA1 = sorted(filesA1)
@@ -63,6 +62,20 @@ import yaml
 with open("config.yaml", "r") as f:
     config = yaml.safe_load(f)
 
+
+class Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+            stream.flush()
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
 # ------------------ 用户配置区（请根据需要修改） ------------------
 target_path = 'PPfNIRS'  # 目录，里面放 .fif 文件
 filesA1 = [os.path.join(target_path, f) for f in os.listdir(target_path) if f.endswith('.fif') and 'A1' in f]
@@ -79,8 +92,8 @@ MAX_CHANNELS = 88
 top_k = min(int(config["top_k"]), MAX_CHANNELS)  # fNIRS 最多 88 通道
 window_size_samples = config["window_size_samples"]
 window_stride_samples = config["window_stride_samples"]
-batch_size = config["batch_size"]
-n_epochs = config["n_epochs"]
+batch_size = args.batch_size if args.batch_size is not None else config["batch_size"]
+n_epochs = args.epochs if args.epochs is not None else config["n_epochs"]
 lr = config["lr"]
 weight_decay = config["weight_decay"]
 seed = config["seed"]
@@ -153,10 +166,12 @@ while top_k > t/3:
     global_results = []  # 列表，后面会 append dicts: {'subject':..., 'top_k':..., 'test_acc':..., ...}
     # ------------------ 输出重定向（安全） ------------------
     now_time = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    out_fname = f'{now_time}_{top_k}_{n_epochs}_{lr}_trainfnirs.md'
+    log_dir = "Logs"
+    os.makedirs(log_dir, exist_ok=True)
+    out_fname = os.path.join(log_dir, f'{now_time}_{top_k}_{n_epochs}_{lr}_trainfnirs.log')
     orig_stdout = sys.stdout
     f_out = open(out_fname, 'w')
-    sys.stdout = f_out
+    sys.stdout = Tee(orig_stdout, f_out)
     # 打印超参数
     print("\n📌 Training Hyperparameters:")
     print(f"保留的通道数: {top_k}")
@@ -349,7 +364,7 @@ while top_k > t/3:
                     batch_size=batch_size,
                     callbacks=[
                         "accuracy",
-                        ("lr_scheduler", LRScheduler("CosineAnnealingLR", T_max=n_epochs - 1)),
+                        ("lr_scheduler", LRScheduler("CosineAnnealingLR", T_max=max(1, n_epochs - 1))),
                     ],
                     device=device,
                     classes=classes,
