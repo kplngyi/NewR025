@@ -324,6 +324,7 @@ while top_k >= MIN_TOP_K:
     print(f"权重衰减: {weight_decay}")
     print(f"批大小: {batch_size}")
     print(f"训练轮数: {n_epochs}")
+    print(f"模型: {args.model}")
     print(f"模态最大通道数: {MAX_CHANNELS}")
     print(f"最小搜索通道数: {MIN_TOP_K}")
     print(f"通道搜索步长: {TOP_K_STEP}")
