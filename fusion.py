@@ -636,6 +636,10 @@ while top_k >= MIN_TOP_K:
                     "n_test": int(X_test.shape[0]),
                     "test_acc": float(test_acc),
                     "selected_channel_idx": selected_channels,
+                    "selected_channel_scores": [
+                        float(s) for s in channel_scores[selected_channels]
+                    ],
+                    "all_channel_scores": [float(s) for s in channel_scores],
                     "selected_channel_names": selected_channel_names,
                 }
                 global_results.append(result_entry)

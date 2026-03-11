@@ -572,6 +572,10 @@ def run_single_subject_experiment(
         "test_macro_f1": float(test_macro_f1),
         "selected_channel_idx": json.dumps([int(x) for x in selected_channels]),
         "selected_channel_names": json.dumps(selected_channel_names),
+        "selected_channel_scores": json.dumps(
+            [float(s) for s in channel_scores[selected_channels]]
+        ),
+        "all_channel_scores": json.dumps([float(s) for s in channel_scores]),
     }
     summary_csv = os.path.join(
         save_dir, f"{now_time}_{subject_tag}_{args.task_type}_{args.model}_summary.csv"
@@ -739,6 +743,8 @@ def run_eegbci_experiment(args):
                 "window_stride_samples": int(args.window_stride_samples),
                 "selected_channel_idx": "",
                 "selected_channel_names": "",
+                "selected_channel_scores": "",
+                "all_channel_scores": "",
             }
         )
         std_row.update(
@@ -755,6 +761,8 @@ def run_eegbci_experiment(args):
                 "window_stride_samples": int(args.window_stride_samples),
                 "selected_channel_idx": "",
                 "selected_channel_names": "",
+                "selected_channel_scores": "",
+                "all_channel_scores": "",
             }
         )
         aggregate_df = pd.concat(
