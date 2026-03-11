@@ -4,11 +4,12 @@ EEG, fNIRS, and EEG-fNIRS fusion training scripts for movement classification ba
 
 ## Overview
 
-This repository contains three main training pipelines:
+This repository contains three main training pipelines and one public-dataset sanity-check script:
 
 - `eeg.py`: EEG classification
 - `fnirs.py`: fNIRS classification
 - `fusion.py`: EEG-fNIRS fusion classification
+- `eegbci_quick_test.py`: EEGBCI 3-class public benchmark quick test
 
 The current scripts share the same core workflow:
 
@@ -27,6 +28,7 @@ This trial-first split avoids leakage from overlapping windows crossing dataset 
 - `eeg.py`: EEG pipeline with `tdpsd` or `bandpower` Fisher channel ranking
 - `fnirs.py`: fNIRS pipeline with trial reconstruction from annotation `11`
 - `fusion.py`: fusion pipeline using existing `Rest -> Elbow_Flexion -> Elbow_Extension` annotation triplets as trials
+- `eegbci_quick_test.py`: standalone EEGBCI imagery/execution test script with automatic download and public-data evaluation
 - `model_factory.py`: model builder for `shallow` and `temporal_se`
 - `runtime_utils.py`: shared runtime path, config, and output-directory helpers
 - `fe_u/eeg_bandpower.py`: EEG bandpower feature scoring
@@ -52,13 +54,13 @@ Typical filenames:
 Default training settings are read from `config.yaml`:
 
 ```yaml
-top_k: 88
+top_k: 32
 window_size_samples: 200
 window_stride_samples: 100
 batch_size: 32
 n_epochs: 100
-lr: 0.01
-weight_decay: 0
+lr: 0.000625
+weight_decay: 0.001
 seed: 20250713
 ```
 
@@ -90,6 +92,17 @@ Additional modality-specific arguments:
   - `--model`
 - `fusion.py`
   - `--model`
+- `eegbci_quick_test.py`
+  - `--task_type`
+  - `--subjects`
+  - `--runs`
+  - `--device`
+  - `--model`
+  - `--fisher_method`
+  - `--bandpower_mode`
+  - `--early_stopping_patience`
+  - `--window_size_samples`
+  - `--window_stride_samples`
 
 ## Usage
 
@@ -117,6 +130,18 @@ Run fusion training:
 python fusion.py --data_dir FusionEEG-fNIRS --model shallow --top_k 151
 ```
 
+Run the EEGBCI public-dataset quick test:
+
+```bash
+python eegbci_quick_test.py
+```
+
+Run the EEGBCI quick test on a few subjects only:
+
+```bash
+python eegbci_quick_test.py --subjects 1 2 3 --model temporal_se
+```
+
 Limit the number of files for quick checks:
 
 ```bash
@@ -135,6 +160,7 @@ Common outputs include:
 - `ResEEG/`: EEG confusion matrices, selected channels, and summaries
 - `ResfNIRS/`: fNIRS confusion matrices and summaries
 - `ResFusion/`: fusion confusion matrices and summaries
+- `ResEEGBCI/`: EEGBCI quick-test confusion matrices, channel selections, and summaries
 
 Generated files include:
 
@@ -150,6 +176,7 @@ The scripts now use trial-first splitting:
 - `eeg.py`: trials are reconstructed from `Stimulus/S  5`
 - `fnirs.py`: trials are reconstructed from annotation `11`
 - `fusion.py`: each `Rest -> Elbow_Flexion -> Elbow_Extension` triplet is treated as one trial
+- `eegbci_quick_test.py`: each EEGBCI annotation segment (`T0/T1/T2`) is treated as one trial before split/windowing
 
 This means:
 
@@ -179,6 +206,17 @@ Use `test.ipynb` to inspect relabeled EEG data:
 - preview relabeled annotation tables
 - save relabeled EEG FIF files
 - inspect a selected trial with MNE plotting
+
+## EEGBCI Quick Test
+
+Use `eegbci_quick_test.py` to validate model behavior on a public EEG dataset.
+
+- defaults to the EEGBCI imagery task with runs `4/8/12`
+- uses three classes: `Rest`, `Left_Fist`, `Right_Fist`
+- checks whether EEGBCI files already exist under `data/eegbci`
+- downloads missing files automatically to `data/eegbci`
+- reports class counts, majority-class baselines, accuracy, balanced accuracy, and macro F1
+- saves logs and result files under `Logs/` and `ResEEGBCI/`
 
 ## Requirements
 
