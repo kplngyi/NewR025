@@ -82,7 +82,8 @@ import yaml
 # 读取配置文件
 with open(resolve_path(args.config_path, project_root), "r") as f:
     config = yaml.safe_load(f)
-
+# Keep MNE informational chatter out of training logs.
+mne.set_log_level("WARNING")
 
 class Tee:
     def __init__(self, *streams):
@@ -441,7 +442,7 @@ while top_k >= MIN_TOP_K:
         print("Processing finished. Log saved to", out_fname)
     ## 保存csv
     summary_df = pd.DataFrame(global_results)
-    summary_csv = os.path.join(save_dir, f"summary_{top_k}_results.csv")
+    summary_csv = os.path.join(save_dir, f"summary_{n_epochs}_{batch_size}_{top_k}_results.csv")
     summary_df.to_csv(summary_csv, index=False)
     print("Saved summary CSV:", summary_csv)
     top_k = top_k - TOP_K_STEP

@@ -14,11 +14,11 @@ from runtime_utils import (
 )
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--batch_size', type=int, default=64)
-parser.add_argument('--epochs', type=int, default=30)
+parser.add_argument('--batch_size', type=int, default=32)
+parser.add_argument('--epochs', type=int, default=300)
 parser.add_argument('--data_dir', type=str, default='PPEEG')
 parser.add_argument('--device', type=str, default='auto')
-parser.add_argument('--model', type=str, default='shallow', choices=['shallow', 'temporal_se'])
+parser.add_argument('--model', type=str, default='temporal_se', choices=['shallow', 'temporal_se'])
 args = parse_known_args(add_common_runtime_args(parser))
 
 # 切换到项目根目录，兼容本地脚本和 Colab 工作目录
@@ -76,7 +76,8 @@ import yaml
 # 读取配置文件
 with open(resolve_path(args.config_path, project_root), "r") as f:
     config = yaml.safe_load(f)
-
+# Keep MNE informational chatter out of training logs.
+mne.set_log_level("WARNING")
 
 class Tee:
     def __init__(self, *streams):
@@ -275,16 +276,17 @@ while top_k >= MIN_TOP_K:
             descriptions_braindecode = [{"event_code": [0, 1, 2], "subject": subject_id}]
             mapping = {'Rest': 0, 'Elbow_Flexion': 1, 'Elbow_Extension': 2}
             parts = [raw]
+
             windows_dataset = create_from_mne_raw(
-                parts,
-                trial_start_offset_samples=0,
-                trial_stop_offset_samples=0,
-                window_size_samples=window_size_samples,
-                window_stride_samples=window_stride_samples,
-                drop_last_window=False,
-                descriptions=descriptions_braindecode,
-                mapping=mapping,
-            )
+                    parts,
+                    trial_start_offset_samples=0,
+                    trial_stop_offset_samples=0,
+                    window_size_samples=window_size_samples,
+                    window_stride_samples=window_stride_samples,
+                    drop_last_window=False,
+                    descriptions=descriptions_braindecode,
+                    mapping=mapping,
+                )
             print("Created windows_dataset, length:", len(windows_dataset))
             
 
@@ -471,7 +473,7 @@ while top_k >= MIN_TOP_K:
         print(f"Script finished. Log saved to {out_fname}")
     ## 保存csv
     summary_df = pd.DataFrame(global_results)
-    summary_csv = os.path.join(save_dir, f"summary_{top_k}_results.csv")
+    summary_csv = os.path.join(save_dir, f"summary_{n_epochs}_{batch_size}_{top_k}_results.csv")
     summary_df.to_csv(summary_csv, index=False)
     print("Saved summary CSV:", summary_csv)
     top_k = top_k - TOP_K_STEP
