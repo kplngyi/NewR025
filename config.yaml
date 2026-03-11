@@ -1,10 +1,10 @@
-top_k: 88
+top_k: 32
 window_size_samples: 200
 window_stride_samples: 100
 
 batch_size: 32
 n_epochs: 100
 # lr: 0.000625
-lr: 0.01
-weight_decay: 0
+lr: 0.000625
+weight_decay: 0.001
 seed: 20250713

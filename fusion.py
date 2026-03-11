@@ -19,7 +19,7 @@ from model_factory import build_model
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 from sklearn.model_selection import train_test_split
 from sklearn.utils import compute_class_weight
-from skorch.callbacks import LRScheduler
+from skorch.callbacks import EarlyStopping, LRScheduler
 from skorch.dataset import Dataset as SkorchDataset
 from skorch.helper import predefined_split
 from runtime_utils import (
@@ -38,6 +38,7 @@ parser.add_argument(
     "--model", type=str, default="shallow", choices=["shallow", "temporal_se"]
 )
 parser.add_argument("--top_k", type=int, default=None)
+parser.add_argument("--early_stopping_patience", type=int, default=15)
 args = parse_known_args(add_common_runtime_args(parser))
 
 
@@ -207,6 +208,40 @@ def select_windows_with_channels(windows_dataset, selected_channels):
     return selected_samples
 
 
+def summarize_training_history(clf, max_epochs, early_stopping_patience):
+    history = getattr(clf, "history", None)
+    if history is None or len(history) == 0:
+        print("No training history available.")
+        return
+
+    best_epoch = None
+    best_valid_loss = None
+    best_valid_accuracy = None
+
+    for row in history:
+        valid_loss = row.get("valid_loss")
+        if valid_loss is None:
+            continue
+        if best_valid_loss is None or valid_loss < best_valid_loss:
+            best_valid_loss = float(valid_loss)
+            best_epoch = int(row.get("epoch", len(history)))
+            valid_accuracy = row.get("valid_accuracy", row.get("valid_acc"))
+            best_valid_accuracy = (
+                None if valid_accuracy is None else float(valid_accuracy)
+            )
+
+    epochs_ran = len(history)
+    stopped_early = early_stopping_patience > 0 and epochs_ran < max_epochs
+
+    print(f"Epochs completed: {epochs_ran}/{max_epochs}")
+    print(f"Early stopping triggered: {stopped_early}")
+    if best_epoch is not None:
+        print(f"Best valid_loss epoch: {best_epoch}")
+        print(f"Best valid_loss: {best_valid_loss:.4f}")
+        if best_valid_accuracy is not None:
+            print(f"Best-epoch valid_accuracy: {best_valid_accuracy:.4f}")
+
+
 def fisher_score_channels_from_windows_dataset(windows_dataset):
     """
     计算 Fisher score（每窗口每通道 mean(abs(X)) 作为通道特征）。
@@ -325,6 +360,7 @@ while top_k >= MIN_TOP_K:
     print(f"批大小: {batch_size}")
     print(f"训练轮数: {n_epochs}")
     print(f"模型: {args.model}")
+    print(f"Early stopping patience: {args.early_stopping_patience}")
     print(f"模态最大通道数: {MAX_CHANNELS}")
     print(f"最小搜索通道数: {MIN_TOP_K}")
     print(f"通道搜索步长: {TOP_K_STEP}")
@@ -513,6 +549,24 @@ while top_k >= MIN_TOP_K:
 
                 # ------------------ Skorch Dataset for valid ------------------
                 valid_ds = SkorchDataset(X_valid, y_valid)
+                callbacks = [
+                    "accuracy",
+                    (
+                        "lr_scheduler",
+                        LRScheduler("CosineAnnealingLR", T_max=max(1, n_epochs - 1)),
+                    ),
+                ]
+                if args.early_stopping_patience > 0:
+                    callbacks.append(
+                        (
+                            "early_stopping",
+                            EarlyStopping(
+                                monitor="valid_loss",
+                                patience=args.early_stopping_patience,
+                                lower_is_better=True,
+                            ),
+                        )
+                    )
 
                 # ------------------ 构建 EEGClassifier ------------------
                 clf = EEGClassifier(
@@ -523,15 +577,7 @@ while top_k >= MIN_TOP_K:
                     optimizer__lr=lr,
                     optimizer__weight_decay=weight_decay,
                     batch_size=batch_size,
-                    callbacks=[
-                        "accuracy",
-                        (
-                            "lr_scheduler",
-                            LRScheduler(
-                                "CosineAnnealingLR", T_max=max(1, n_epochs - 1)
-                            ),
-                        ),
-                    ],
+                    callbacks=callbacks,
                     device=device,
                     classes=classes,
                     max_epochs=n_epochs,
@@ -540,6 +586,11 @@ while top_k >= MIN_TOP_K:
                 print("Start training...")
                 clf.fit(X_train, y=y_train)
                 print("Training finished.")
+                summarize_training_history(
+                    clf,
+                    max_epochs=n_epochs,
+                    early_stopping_patience=args.early_stopping_patience,
+                )
 
                 # ---------- 评估 ----------
                 y_pred_test = clf.predict(X_test)
