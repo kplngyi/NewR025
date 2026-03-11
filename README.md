@@ -239,6 +239,7 @@ Use the EEGBCI scripts to validate model behavior on a public EEG dataset.
 - supports separate wrappers for `temporal_se`, `eegnet`, `deep4`, and `shallow`
 - supports `--disable_channel_selection` for a more standard public-dataset baseline
 - applies EEGBCI preprocessing with `60 Hz` notch, `1-40 Hz` band-pass, and average EEG reference by default
+- runs within-subject classification when multiple subjects are provided, then writes per-subject and aggregate summaries
 - reports class counts, majority-class baselines, accuracy, balanced accuracy, and macro F1
 - saves logs and result files under `Logs/` and `ResEEGBCI/`
 

@@ -337,6 +337,250 @@ def plot_and_save(cm, labels, title, fname):
     print(f"Saved image: {fname}")
 
 
+def run_single_subject_experiment(
+    subject_id,
+    subject_trials,
+    args,
+    requested_top_k,
+    batch_size,
+    n_epochs,
+    lr,
+    weight_decay,
+    seed,
+    now_time,
+    save_dir,
+):
+    print("\n" + "=" * 80)
+    print(f"Current subject: S{subject_id}")
+    print(f"Subject trial count: {len(subject_trials)}")
+    print("Subject trial label counts:", label_counts_from_trials(subject_trials))
+
+    train_trials, valid_trials, test_trials = stratified_split_trial_records(
+        subject_trials, random_state=seed
+    )
+    print("Trial split sizes:", len(train_trials), len(valid_trials), len(test_trials))
+    print("Train trial label counts:", label_counts_from_trials(train_trials))
+    print("Valid trial label counts:", label_counts_from_trials(valid_trials))
+    print("Test trial label counts:", label_counts_from_trials(test_trials))
+
+    train_samples = create_window_samples(
+        train_trials,
+        window_size_samples=args.window_size_samples,
+        window_stride_samples=args.window_stride_samples,
+    )
+    valid_samples = create_window_samples(
+        valid_trials,
+        window_size_samples=args.window_size_samples,
+        window_stride_samples=args.window_stride_samples,
+    )
+    test_samples = create_window_samples(
+        test_trials,
+        window_size_samples=args.window_size_samples,
+        window_stride_samples=args.window_stride_samples,
+    )
+
+    if min(len(train_samples), len(valid_samples), len(test_samples)) == 0:
+        raise RuntimeError("One of the subject splits produced no windows.")
+
+    train_window_counts = label_counts_from_samples(train_samples)
+    valid_window_counts = label_counts_from_samples(valid_samples)
+    test_window_counts = label_counts_from_samples(test_samples)
+    print("Train window label counts:", train_window_counts)
+    print("Valid window label counts:", valid_window_counts)
+    print("Test window label counts:", test_window_counts)
+    print(f"Valid majority baseline: {majority_baseline(valid_window_counts):.4f}")
+    print(f"Test majority baseline: {majority_baseline(test_window_counts):.4f}")
+
+    n_channels_total = np.array(train_samples[0][0]).shape[0]
+    train_sfreq = float(train_trials[0]["sfreq"])
+    print(f"Subject sampling rate: {train_sfreq} Hz")
+    if args.disable_channel_selection:
+        selected_channels = list(range(n_channels_total))
+        channel_scores = np.ones(n_channels_total, dtype=np.float32)
+        print("Channel selection disabled: using all EEG channels.")
+    else:
+        if args.fisher_method == "bandpower":
+            rank_idx, channel_scores = (
+                fisher_score_channels_alpha_beta_from_windows_dataset(
+                    train_samples,
+                    fs=train_sfreq,
+                    mode=args.bandpower_mode,
+                )
+            )
+        else:
+            rank_idx, channel_scores, _ = (
+                fisher_score_channels_from_windows_dataset_tdpsd(train_samples)
+            )
+        top_k_use = min(int(requested_top_k), n_channels_total)
+        selected_channels = list(rank_idx[:top_k_use])
+    top_k_use = len(selected_channels)
+
+    selected_channel_names = [train_trials[0]["ch_names"][i] for i in selected_channels]
+    print(f"Total channels: {n_channels_total}, selecting top_k = {top_k_use}")
+    print("Selected channel indices:", selected_channels)
+    print("Selected channel names:", selected_channel_names)
+
+    train_set = select_windows_with_channels(train_samples, selected_channels)
+    valid_set = select_windows_with_channels(valid_samples, selected_channels)
+    test_set = select_windows_with_channels(test_samples, selected_channels)
+
+    X_train, y_train = extract_X_y_from_sample_list(train_set)
+    X_valid, y_valid = extract_X_y_from_sample_list(valid_set)
+    X_test, y_test = extract_X_y_from_sample_list(test_set)
+
+    print(
+        "Train/Valid/Test sizes:",
+        X_train.shape[0],
+        X_valid.shape[0],
+        X_test.shape[0],
+    )
+    print(
+        "Shapes (n_windows, n_ch_sel, n_time):",
+        X_train.shape,
+        X_valid.shape,
+        X_test.shape,
+    )
+
+    train_device = resolve_training_device(args.device)
+    print(f"Requested device: {args.device}")
+    print(f"Resolved device: {train_device}")
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    print(f"CUDA device count: {torch.cuda.device_count()}")
+    if train_device.type == "cuda":
+        print(f"Using GPU: {torch.cuda.get_device_name(train_device)}")
+
+    set_random_seeds(seed=seed, cuda=train_device.type == "cuda")
+    classes = np.unique(y_train)
+
+    model = build_model(
+        args.model,
+        n_channels=X_train.shape[1],
+        n_classes=len(classes),
+        n_times=X_train.shape[2],
+    )
+    if train_device.type == "cuda":
+        model.cuda()
+    print("Model:", args.model)
+    print(model)
+
+    class_weights = compute_class_weight("balanced", classes=classes, y=y_train)
+    class_weights = torch.FloatTensor(class_weights).to(train_device)
+    criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
+    valid_ds = SkorchDataset(X_valid, y_valid)
+    callbacks = [
+        "accuracy",
+        (
+            "lr_scheduler",
+            LRScheduler("CosineAnnealingLR", T_max=max(1, n_epochs - 1)),
+        ),
+    ]
+    if args.early_stopping_patience > 0:
+        callbacks.append(
+            (
+                "early_stopping",
+                EarlyStopping(
+                    monitor="valid_loss",
+                    patience=args.early_stopping_patience,
+                    lower_is_better=True,
+                ),
+            )
+        )
+
+    clf = EEGClassifier(
+        model,
+        criterion=criterion,
+        optimizer=torch.optim.AdamW,
+        train_split=predefined_split(valid_ds),
+        optimizer__lr=lr,
+        optimizer__weight_decay=weight_decay,
+        batch_size=batch_size,
+        callbacks=callbacks,
+        device=str(train_device),
+        classes=classes,
+        max_epochs=n_epochs,
+    )
+
+    print("Start training...")
+    clf.fit(X_train, y=y_train)
+    print("Training finished.")
+    summarize_training_history(
+        clf,
+        max_epochs=n_epochs,
+        early_stopping_patience=args.early_stopping_patience,
+    )
+
+    y_pred_test = clf.predict(X_test)
+    test_acc = accuracy_score(y_test, y_pred_test)
+    test_bal_acc = balanced_accuracy_score(y_test, y_pred_test)
+    test_macro_f1 = f1_score(y_test, y_pred_test, average="macro")
+    print(f"Test acc: {(test_acc * 100):.2f}%")
+    print(f"Test balanced_acc: {test_bal_acc:.4f}")
+    print(f"Test macro_f1: {test_macro_f1:.4f}")
+
+    subject_tag = f"S{subject_id}"
+    labels_for_cm = ["Rest", "Left_Fist", "Right_Fist"]
+    cm_test = confusion_matrix(y_test, y_pred_test, labels=[0, 1, 2])
+    cm_png = os.path.join(
+        save_dir, f"{now_time}_{subject_tag}_{args.task_type}_{args.model}_cm_test.png"
+    )
+    cm_csv = os.path.join(
+        save_dir, f"{now_time}_{subject_tag}_{args.task_type}_{args.model}_cm_test.csv"
+    )
+    plot_and_save(
+        cm_test,
+        labels_for_cm,
+        f"EEGBCI Confusion Matrix (Test) - {subject_tag}",
+        cm_png,
+    )
+    pd.DataFrame(cm_test, index=labels_for_cm, columns=labels_for_cm).to_csv(cm_csv)
+
+    selected_channels_csv = os.path.join(
+        save_dir,
+        f"{now_time}_{subject_tag}_{args.task_type}_{args.model}_selected_channels.csv",
+    )
+    pd.DataFrame(
+        {
+            "selected_channel_idx": selected_channels,
+            "selected_channel_name": selected_channel_names,
+            "score": channel_scores[selected_channels],
+        }
+    ).to_csv(selected_channels_csv, index=False)
+
+    subject_runs = sorted({int(record["run"]) for record in subject_trials})
+    summary_entry = {
+        "timestamp": now_time,
+        "subject": subject_tag,
+        "task_type": args.task_type,
+        "runs": json.dumps(subject_runs),
+        "model": args.model,
+        "fisher_method": args.fisher_method,
+        "disable_channel_selection": bool(args.disable_channel_selection),
+        "top_k": int(top_k_use),
+        "window_size_samples": int(args.window_size_samples),
+        "window_stride_samples": int(args.window_stride_samples),
+        "n_trials_total": int(len(subject_trials)),
+        "n_train_trials": int(len(train_trials)),
+        "n_valid_trials": int(len(valid_trials)),
+        "n_test_trials": int(len(test_trials)),
+        "n_train_windows": int(X_train.shape[0]),
+        "n_valid_windows": int(X_valid.shape[0]),
+        "n_test_windows": int(X_test.shape[0]),
+        "valid_majority_baseline": float(majority_baseline(valid_window_counts)),
+        "test_majority_baseline": float(majority_baseline(test_window_counts)),
+        "test_acc": float(test_acc),
+        "test_balanced_acc": float(test_bal_acc),
+        "test_macro_f1": float(test_macro_f1),
+        "selected_channel_idx": json.dumps([int(x) for x in selected_channels]),
+        "selected_channel_names": json.dumps(selected_channel_names),
+    }
+    summary_csv = os.path.join(
+        save_dir, f"{now_time}_{subject_tag}_{args.task_type}_{args.model}_summary.csv"
+    )
+    pd.DataFrame([summary_entry]).to_csv(summary_csv, index=False)
+    print(f"Saved summary CSV: {summary_csv}")
+    return summary_entry
+
+
 def run_eegbci_experiment(args):
     cwd = os.getcwd()
     project_root = resolve_project_root(__file__, args.project_root)
@@ -404,7 +648,7 @@ def run_eegbci_experiment(args):
         eegbci_paths = load_eegbci_paths(subjects, runs, data_dir)
         print(f"Requested EEGBCI file count: {len(eegbci_paths)}")
 
-        trial_records = []
+        subject_to_trials = {}
         for path in eegbci_paths:
             raw = mne.io.read_raw_edf(path, preload=True, verbose="ERROR")
             eegbci.standardize(raw)
@@ -428,232 +672,107 @@ def run_eegbci_experiment(args):
                 window_size_samples=args.window_size_samples,
             )
             print(f"Loaded {file_name}: retained {len(raw_trials)} labeled segments")
-            trial_records.extend(raw_trials)
+            subject_to_trials.setdefault(subject_id, []).extend(raw_trials)
 
-        if len(trial_records) == 0:
+        if not subject_to_trials:
             raise RuntimeError("No EEGBCI trials were extracted.")
 
-        print(f"Total pooled trial count: {len(trial_records)}")
-        print("Trial label counts:", label_counts_from_trials(trial_records))
+        print("Subjects with extracted trials:")
+        for subject_id in sorted(subject_to_trials):
+            print(f"- S{subject_id}: {len(subject_to_trials[subject_id])} trials")
 
-        train_trials, valid_trials, test_trials = stratified_split_trial_records(
-            trial_records, random_state=seed
-        )
-        print(
-            "Trial split sizes:", len(train_trials), len(valid_trials), len(test_trials)
-        )
-        print("Train trial label counts:", label_counts_from_trials(train_trials))
-        print("Valid trial label counts:", label_counts_from_trials(valid_trials))
-        print("Test trial label counts:", label_counts_from_trials(test_trials))
-
-        train_samples = create_window_samples(
-            train_trials,
-            window_size_samples=args.window_size_samples,
-            window_stride_samples=args.window_stride_samples,
-        )
-        valid_samples = create_window_samples(
-            valid_trials,
-            window_size_samples=args.window_size_samples,
-            window_stride_samples=args.window_stride_samples,
-        )
-        test_samples = create_window_samples(
-            test_trials,
-            window_size_samples=args.window_size_samples,
-            window_stride_samples=args.window_stride_samples,
-        )
-
-        if min(len(train_samples), len(valid_samples), len(test_samples)) == 0:
-            raise RuntimeError("One of the EEGBCI splits produced no windows.")
-
-        train_window_counts = label_counts_from_samples(train_samples)
-        valid_window_counts = label_counts_from_samples(valid_samples)
-        test_window_counts = label_counts_from_samples(test_samples)
-        print("Train window label counts:", train_window_counts)
-        print("Valid window label counts:", valid_window_counts)
-        print("Test window label counts:", test_window_counts)
-        print(f"Valid majority baseline: {majority_baseline(valid_window_counts):.4f}")
-        print(f"Test majority baseline: {majority_baseline(test_window_counts):.4f}")
-
-        n_channels_total = np.array(train_samples[0][0]).shape[0]
-        train_sfreq = float(train_trials[0]["sfreq"])
-        if args.disable_channel_selection:
-            selected_channels = list(range(n_channels_total))
-            channel_scores = np.ones(n_channels_total, dtype=np.float32)
-            print("Channel selection disabled: using all EEG channels.")
-        else:
-            if args.fisher_method == "bandpower":
-                rank_idx, channel_scores = (
-                    fisher_score_channels_alpha_beta_from_windows_dataset(
-                        train_samples,
-                        fs=train_sfreq,
-                        mode=args.bandpower_mode,
-                    )
+        all_subject_results = []
+        for subject_id in sorted(subject_to_trials):
+            subject_trials = subject_to_trials[subject_id]
+            try:
+                result = run_single_subject_experiment(
+                    subject_id=subject_id,
+                    subject_trials=subject_trials,
+                    args=args,
+                    requested_top_k=requested_top_k,
+                    batch_size=batch_size,
+                    n_epochs=n_epochs,
+                    lr=lr,
+                    weight_decay=weight_decay,
+                    seed=seed,
+                    now_time=now_time,
+                    save_dir=save_dir,
                 )
-            else:
-                rank_idx, channel_scores, _ = (
-                    fisher_score_channels_from_windows_dataset_tdpsd(train_samples)
-                )
-            top_k_use = min(int(requested_top_k), n_channels_total)
-            selected_channels = list(rank_idx[:top_k_use])
-        top_k_use = len(selected_channels)
+            except Exception as exc:
+                print(f"Skipping subject S{subject_id} due to error: {exc}")
+                continue
+            all_subject_results.append(result)
 
-        selected_channel_names = [
-            train_trials[0]["ch_names"][i] for i in selected_channels
-        ]
-        print(f"Total channels: {n_channels_total}, selecting top_k = {top_k_use}")
-        print("Selected channel indices:", selected_channels)
-        print("Selected channel names:", selected_channel_names)
-
-        train_set = select_windows_with_channels(train_samples, selected_channels)
-        valid_set = select_windows_with_channels(valid_samples, selected_channels)
-        test_set = select_windows_with_channels(test_samples, selected_channels)
-
-        X_train, y_train = extract_X_y_from_sample_list(train_set)
-        X_valid, y_valid = extract_X_y_from_sample_list(valid_set)
-        X_test, y_test = extract_X_y_from_sample_list(test_set)
-
-        print(
-            "Train/Valid/Test sizes:",
-            X_train.shape[0],
-            X_valid.shape[0],
-            X_test.shape[0],
-        )
-        print(
-            "Shapes (n_windows, n_ch_sel, n_time):",
-            X_train.shape,
-            X_valid.shape,
-            X_test.shape,
-        )
-
-        train_device = resolve_training_device(args.device)
-        print(f"Requested device: {args.device}")
-        print(f"Resolved device: {train_device}")
-        print(f"CUDA available: {torch.cuda.is_available()}")
-        print(f"CUDA device count: {torch.cuda.device_count()}")
-        if train_device.type == "cuda":
-            print(f"Using GPU: {torch.cuda.get_device_name(train_device)}")
-
-        set_random_seeds(seed=seed, cuda=train_device.type == "cuda")
-        classes = np.unique(y_train)
-
-        model = build_model(
-            args.model,
-            n_channels=X_train.shape[1],
-            n_classes=len(classes),
-            n_times=X_train.shape[2],
-        )
-        if train_device.type == "cuda":
-            model.cuda()
-        print("Model:", args.model)
-        print(model)
-
-        class_weights = compute_class_weight("balanced", classes=classes, y=y_train)
-        class_weights = torch.FloatTensor(class_weights).to(train_device)
-        criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
-        valid_ds = SkorchDataset(X_valid, y_valid)
-        callbacks = [
-            "accuracy",
-            (
-                "lr_scheduler",
-                LRScheduler("CosineAnnealingLR", T_max=max(1, n_epochs - 1)),
-            ),
-        ]
-        if args.early_stopping_patience > 0:
-            callbacks.append(
-                (
-                    "early_stopping",
-                    EarlyStopping(
-                        monitor="valid_loss",
-                        patience=args.early_stopping_patience,
-                        lower_is_better=True,
-                    ),
-                )
+        if not all_subject_results:
+            raise RuntimeError(
+                "All requested subjects failed during within-subject training."
             )
 
-        clf = EEGClassifier(
-            model,
-            criterion=criterion,
-            optimizer=torch.optim.AdamW,
-            train_split=predefined_split(valid_ds),
-            optimizer__lr=lr,
-            optimizer__weight_decay=weight_decay,
-            batch_size=batch_size,
-            callbacks=callbacks,
-            device=str(train_device),
-            classes=classes,
-            max_epochs=n_epochs,
-        )
-
-        print("Start training...")
-        clf.fit(X_train, y=y_train)
-        print("Training finished.")
-        summarize_training_history(
-            clf,
-            max_epochs=n_epochs,
-            early_stopping_patience=args.early_stopping_patience,
-        )
-
-        y_pred_test = clf.predict(X_test)
-        test_acc = accuracy_score(y_test, y_pred_test)
-        test_bal_acc = balanced_accuracy_score(y_test, y_pred_test)
-        test_macro_f1 = f1_score(y_test, y_pred_test, average="macro")
-        print(f"Test acc: {(test_acc * 100):.2f}%")
-        print(f"Test balanced_acc: {test_bal_acc:.4f}")
-        print(f"Test macro_f1: {test_macro_f1:.4f}")
-
-        labels_for_cm = ["Rest", "Left_Fist", "Right_Fist"]
-        cm_test = confusion_matrix(y_test, y_pred_test, labels=[0, 1, 2])
-        cm_png = os.path.join(
-            save_dir, f"{now_time}_{args.task_type}_{args.model}_cm_test.png"
-        )
-        cm_csv = os.path.join(
-            save_dir, f"{now_time}_{args.task_type}_{args.model}_cm_test.csv"
-        )
-        plot_and_save(cm_test, labels_for_cm, "EEGBCI Confusion Matrix (Test)", cm_png)
-        pd.DataFrame(cm_test, index=labels_for_cm, columns=labels_for_cm).to_csv(cm_csv)
-
-        selected_channels_csv = os.path.join(
-            save_dir, f"{now_time}_{args.task_type}_{args.model}_selected_channels.csv"
-        )
-        pd.DataFrame(
+        aggregate_df = pd.DataFrame(all_subject_results)
+        metric_cols = [
+            "n_trials_total",
+            "n_train_trials",
+            "n_valid_trials",
+            "n_test_trials",
+            "n_train_windows",
+            "n_valid_windows",
+            "n_test_windows",
+            "valid_majority_baseline",
+            "test_majority_baseline",
+            "test_acc",
+            "test_balanced_acc",
+            "test_macro_f1",
+        ]
+        mean_row = {col: aggregate_df[col].mean() for col in metric_cols}
+        std_row = {col: aggregate_df[col].std(ddof=0) for col in metric_cols}
+        mean_row.update(
             {
-                "selected_channel_idx": selected_channels,
-                "selected_channel_name": selected_channel_names,
-                "score": channel_scores[selected_channels],
+                "timestamp": now_time,
+                "subject": "mean",
+                "task_type": args.task_type,
+                "runs": json.dumps(runs),
+                "model": args.model,
+                "fisher_method": args.fisher_method,
+                "disable_channel_selection": bool(args.disable_channel_selection),
+                "top_k": None,
+                "window_size_samples": int(args.window_size_samples),
+                "window_stride_samples": int(args.window_stride_samples),
+                "selected_channel_idx": "",
+                "selected_channel_names": "",
             }
-        ).to_csv(selected_channels_csv, index=False)
-
-        summary_entry = {
-            "timestamp": now_time,
-            "task_type": args.task_type,
-            "subjects": json.dumps(subjects),
-            "runs": json.dumps(runs),
-            "model": args.model,
-            "fisher_method": args.fisher_method,
-            "disable_channel_selection": bool(args.disable_channel_selection),
-            "top_k": int(top_k_use),
-            "window_size_samples": int(args.window_size_samples),
-            "window_stride_samples": int(args.window_stride_samples),
-            "n_trials_total": int(len(trial_records)),
-            "n_train_trials": int(len(train_trials)),
-            "n_valid_trials": int(len(valid_trials)),
-            "n_test_trials": int(len(test_trials)),
-            "n_train_windows": int(X_train.shape[0]),
-            "n_valid_windows": int(X_valid.shape[0]),
-            "n_test_windows": int(X_test.shape[0]),
-            "valid_majority_baseline": float(majority_baseline(valid_window_counts)),
-            "test_majority_baseline": float(majority_baseline(test_window_counts)),
-            "test_acc": float(test_acc),
-            "test_balanced_acc": float(test_bal_acc),
-            "test_macro_f1": float(test_macro_f1),
-            "selected_channel_idx": json.dumps([int(x) for x in selected_channels]),
-            "selected_channel_names": json.dumps(selected_channel_names),
-        }
-        summary_csv = os.path.join(
-            save_dir, f"{now_time}_{args.task_type}_{args.model}_summary.csv"
         )
-        pd.DataFrame([summary_entry]).to_csv(summary_csv, index=False)
-        print(f"Saved summary CSV: {summary_csv}")
+        std_row.update(
+            {
+                "timestamp": now_time,
+                "subject": "std",
+                "task_type": args.task_type,
+                "runs": json.dumps(runs),
+                "model": args.model,
+                "fisher_method": args.fisher_method,
+                "disable_channel_selection": bool(args.disable_channel_selection),
+                "top_k": None,
+                "window_size_samples": int(args.window_size_samples),
+                "window_stride_samples": int(args.window_stride_samples),
+                "selected_channel_idx": "",
+                "selected_channel_names": "",
+            }
+        )
+        aggregate_df = pd.concat(
+            [aggregate_df, pd.DataFrame([mean_row, std_row])], ignore_index=True
+        )
+        aggregate_csv = os.path.join(
+            save_dir, f"{now_time}_{args.task_type}_{args.model}_aggregate_summary.csv"
+        )
+        aggregate_df.to_csv(aggregate_csv, index=False)
+        print(f"Saved aggregate summary CSV: {aggregate_csv}")
+        print(
+            "Aggregate mean metrics:",
+            {
+                "test_acc": round(float(mean_row["test_acc"]), 4),
+                "test_balanced_acc": round(float(mean_row["test_balanced_acc"]), 4),
+                "test_macro_f1": round(float(mean_row["test_macro_f1"]), 4),
+            },
+        )
     finally:
         sys.stdout = orig_stdout
         f_out.close()
