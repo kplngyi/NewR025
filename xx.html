@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>EEG-fNIRS 多模态电极编辑器</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <style>
+        :root { --eeg-color: #000000; --fnirs-source-color: #ff3b30; --fnirs-detector-color: #007aff; --fnirs-color: #ff4757; --link-color: #ff6b81; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f4f7f6; display: flex; margin: 0; height: 100vh; }
+        #sidebar { width: 300px; background: white; padding: 20px; box-shadow: 2px 0 10px rgba(0,0,0,0.1); z-index: 10; overflow-y: auto; }
+        #canvas-container { flex-grow: 1; display: flex; justify-content: center; align-items: center; position: relative; }
+        .canvas-wrapper { background: white; padding: 40px; border-radius: 8px; box-shadow: 0 4px 30px rgba(0,0,0,0.1); position: relative; }
+        canvas { cursor: crosshair; display: block; width: 700px; height: 700px; }
+        h2 { font-size: 1.2rem; border-bottom: 2px solid #eee; padding-bottom: 10px; }
+        .control-group { margin-bottom: 20px; }
+        label { display: block; font-size: 0.9rem; margin-bottom: 5px; color: #666; }
+        input, select { width: 100%; padding: 8px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+        .btn-stack { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        button { padding: 10px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; transition: 0.2s; }
+        .btn-add-eeg { background: var(--eeg-color); color: white; }
+        .btn-add-fnirs { background: var(--fnirs-color); color: white; }
+        .btn-export { background: #2ed573; color: white; margin-top: 10px; }
+        .btn-danger { background: #ff6b6b; color: white; }
+        button:hover { opacity: 0.8; transform: translateY(-1px); }
+        .legend { margin-top: 20px; font-size: 0.85rem; }
+        .legend-item { display: flex; align-items: center; margin-bottom: 5px; }
+        .dot { width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; }
+        .help-text { color:#999; font-size: 0.8rem; line-height: 1.5; }
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <h2>电极控制面板</h2>
+    
+    <div class="control-group">
+        <label>标签名称</label>
+        <input type="text" id="nodeLabel" placeholder="例如: S1, D1, Cz...">
+        <label>类型</label>
+        <select id="nodeType">
+            <option value="EEG">EEG (电极)</option>
+            <option value="fNIRS">fNIRS (光源/检测器)</option>
+        </select>
+        <label>导入为</label>
+        <select id="importNodeType">
+            <option value="EEG">EEG</option>
+            <option value="fNIRS">fNIRS</option>
+        </select>
+        <div class="btn-stack">
+            <button class="btn-add-eeg" onclick="addNode('EEG')">添加 EEG</button>
+            <button class="btn-add-fnirs" onclick="addNode('fNIRS')">添加 fNIRS</button>
+            <button class="btn-add-eeg" onclick="triggerImport()">导入定位文件</button>
+            <button class="btn-add-fnirs" onclick="document.getElementById('importReplace').checked = !document.getElementById('importReplace').checked">切换覆盖模式</button>
+            <button class="btn-export" onclick="exportPDF()">导出 PDF</button>
+            <button class="btn-export" onclick="exportPNG()">导出 PNG</button>
+        </div>
+        <label class="help-text"><input type="checkbox" id="importReplace" checked> 导入时替换同类型现有节点</label>
+        <input type="file" id="positionFileInput" accept=".ced,.txt,.tsv,.csv" style="display:none">
+    </div>
+
+    <div class="control-group">
+        <h2>头轮廓大小</h2>
+        <label for="headSizeSlider">轮廓半径: <span id="headSizeValue">225</span></label>
+        <input type="range" id="headSizeSlider" min="120" max="320" step="1" value="225">
+        <p class="help-text">* 只改变头部轮廓和鼻子大小，不改变电极位置</p>
+    </div>
+
+    <div class="control-group">
+        <h2>圆圈风格</h2>
+        <label>EEG 电极</label>
+        <select id="eegStyle">
+            <option value="solid">实心黑色圆圈</option>
+            <option value="outline" selected>空心黑色圆圈</option>
+        </select>
+        <label>发射探头（S）</label>
+        <select id="sourceStyle">
+            <option value="solid">实心红色圆圈</option>
+            <option value="outline" selected>空心红色圆圈</option>
+        </select>
+        <label>接收探头（D）</label>
+        <select id="detectorStyle">
+            <option value="solid">实心蓝色圆圈</option>
+            <option value="outline" selected>空心蓝色圆圈</option>
+        </select>
+        <label for="nodeRadiusSlider">圆圈大小: <span id="nodeRadiusValue">12</span></label>
+        <input type="range" id="nodeRadiusSlider" min="6" max="24" step="1" value="12">
+        <label for="outlineWidthSlider">边框粗细: <span id="outlineWidthValue">1.2</span></label>
+        <input type="range" id="outlineWidthSlider" min="0.5" max="3" step="0.1" value="1.2">
+        <label for="labelSizeSlider">电极名称大小: <span id="labelSizeValue">8</span></label>
+        <input type="range" id="labelSizeSlider" min="6" max="16" step="1" value="8">
+        <p class="help-text">* 切换后会立即应用到当前所有节点</p>
+    </div>
+
+    <div class="legend">
+        <strong>图例:</strong>
+        <div class="legend-item"><div class="dot" style="background:var(--eeg-color)"></div> EEG 节点</div>
+        <div class="legend-item"><div class="dot" style="background:var(--fnirs-source-color)"></div> fNIRS 发射探头（`S*`）</div>
+        <div class="legend-item"><div class="dot" style="background:var(--fnirs-detector-color)"></div> fNIRS 接收探头（`D*`）</div>
+        <p class="help-text">* 右键点击电极可将其删除</p>
+        <p class="help-text">* 识别到以 `S` 开头的标签时按发射探头显示，`D` 开头时按接收探头显示</p>
+        <p class="help-text">* fNIRS 使用 `S1 / D1`、`S2 / D2` 这类命名时，会按相同编号自动连线</p>
+    </div>
+
+    <div class="control-group">
+        <h2>批量删除</h2>
+        <div class="btn-stack">
+            <button class="btn-danger" onclick="removeNodes('fNIRS')">删除全部 fNIRS</button>
+            <button class="btn-danger" onclick="removeNodes('EEG')">删除全部 EEG</button>
+            <button class="btn-danger btn-export" onclick="removeNodes('ALL')">清空全部节点</button>
+        </div>
+    </div>
+
+    <div id="nodeList" style="margin-top:20px; font-size:0.8rem; color:#666;">
+        </div>
+</div>
+
+<div id="canvas-container">
+    <div class="canvas-wrapper" id="captureArea">
+        <canvas id="eegCanvas"></canvas>
+    </div>
+</div>
+
+<script>
+const canvas = document.getElementById('eegCanvas');
+const ctx = canvas.getContext('2d');
+const canvasSize = 700;
+const devicePixelRatioScale = window.devicePixelRatio || 1;
+canvas.width = canvasSize * devicePixelRatioScale;
+canvas.height = canvasSize * devicePixelRatioScale;
+canvas.style.width = `${canvasSize}px`;
+canvas.style.height = `${canvasSize}px`;
+ctx.scale(devicePixelRatioScale, devicePixelRatioScale);
+const centerX = canvasSize / 2;
+const centerY = canvasSize / 2;
+const scale = 450;
+const positionFileInput = document.getElementById('positionFileInput');
+const headSizeSlider = document.getElementById('headSizeSlider');
+const headSizeValue = document.getElementById('headSizeValue');
+const eegStyleSelect = document.getElementById('eegStyle');
+const sourceStyleSelect = document.getElementById('sourceStyle');
+const detectorStyleSelect = document.getElementById('detectorStyle');
+const nodeRadiusSlider = document.getElementById('nodeRadiusSlider');
+const nodeRadiusValue = document.getElementById('nodeRadiusValue');
+const outlineWidthSlider = document.getElementById('outlineWidthSlider');
+const outlineWidthValue = document.getElementById('outlineWidthValue');
+const labelSizeSlider = document.getElementById('labelSizeSlider');
+const labelSizeValue = document.getElementById('labelSizeValue');
+let headRadius = 225;
+let nodeRadius = 12;
+let outlineWidth = 1.2;
+let labelFontSize = 8;
+
+// 初始 EEG 数据由 Standard-10-20-Cap81.ced 生成
+let nodes = [
+    {label:"Fp1", t:-18, r:0.511, type:'EEG'},
+    {label:"Fpz", t:0, r:0.511, type:'EEG'},
+    {label:"Fp2", t:18, r:0.511, type:'EEG'},
+    {label:"Nz", t:0, r:0.622, type:'EEG'},
+    {label:"AF9", t:-43, r:0.639, type:'EEG'},
+    {label:"AF7", t:-38, r:0.511, type:'EEG'},
+    {label:"AF3", t:-23, r:0.411, type:'EEG'},
+    {label:"AFz", t:0, r:0.383, type:'EEG'},
+    {label:"AF4", t:23, r:0.411, type:'EEG'},
+    {label:"AF8", t:38, r:0.511, type:'EEG'},
+    {label:"AF10", t:43, r:0.639, type:'EEG'},
+    {label:"F9", t:-55, r:0.639, type:'EEG'},
+    {label:"F7", t:-54, r:0.511, type:'EEG'},
+    {label:"F5", t:-49, r:0.417, type:'EEG'},
+    {label:"F3", t:-39, r:0.333, type:'EEG'},
+    {label:"F1", t:-22, r:0.278, type:'EEG'},
+    {label:"Fz", t:0, r:0.256, type:'EEG'},
+    {label:"F2", t:22, r:0.278, type:'EEG'},
+    {label:"F4", t:39, r:0.333, type:'EEG'},
+    {label:"F6", t:49, r:0.417, type:'EEG'},
+    {label:"F8", t:54, r:0.511, type:'EEG'},
+    {label:"F10", t:55, r:0.639, type:'EEG'},
+    {label:"FT9", t:-72, r:0.639, type:'EEG'},
+    {label:"FT7", t:-72, r:0.511, type:'EEG'},
+    {label:"FC5", t:-69, r:0.394, type:'EEG'},
+    {label:"FC3", t:-62, r:0.278, type:'EEG'},
+    {label:"FC1", t:-45, r:0.178, type:'EEG'},
+    {label:"FCz", t:0, r:0.128, type:'EEG'},
+    {label:"FC2", t:45, r:0.178, type:'EEG'},
+    {label:"FC4", t:62, r:0.278, type:'EEG'},
+    {label:"FC6", t:69, r:0.394, type:'EEG'},
+    {label:"FT8", t:72, r:0.511, type:'EEG'},
+    {label:"FT10", t:72, r:0.639, type:'EEG'},
+    {label:"T9", t:-90, r:0.639, type:'EEG'},
+    {label:"T7", t:-90, r:0.511, type:'EEG'},
+    {label:"C5", t:-90, r:0.383, type:'EEG'},
+    {label:"C3", t:-90, r:0.256, type:'EEG'},
+    {label:"C1", t:-90, r:0.128, type:'EEG'},
+    {label:"Cz", t:90, r:0, type:'EEG'},
+    {label:"C2", t:90, r:0.128, type:'EEG'},
+    {label:"C4", t:90, r:0.256, type:'EEG'},
+    {label:"C6", t:90, r:0.383, type:'EEG'},
+    {label:"T8", t:90, r:0.511, type:'EEG'},
+    {label:"T10", t:90, r:0.639, type:'EEG'},
+    {label:"TP9", t:-108, r:0.639, type:'EEG'},
+    {label:"TP7", t:-108, r:0.511, type:'EEG'},
+    {label:"CP5", t:-111, r:0.394, type:'EEG'},
+    {label:"CP3", t:-118, r:0.278, type:'EEG'},
+    {label:"CP1", t:-135, r:0.178, type:'EEG'},
+    {label:"CPz", t:180, r:0.128, type:'EEG'},
+    {label:"CP2", t:135, r:0.178, type:'EEG'},
+    {label:"CP4", t:118, r:0.278, type:'EEG'},
+    {label:"CP6", t:111, r:0.394, type:'EEG'},
+    {label:"TP8", t:108, r:0.511, type:'EEG'},
+    {label:"TP10", t:108, r:0.639, type:'EEG'},
+    {label:"P9", t:-126, r:0.639, type:'EEG'},
+    {label:"P7", t:-126, r:0.511, type:'EEG'},
+    {label:"P5", t:-131, r:0.417, type:'EEG'},
+    {label:"P3", t:-141, r:0.333, type:'EEG'},
+    {label:"P1", t:-158, r:0.278, type:'EEG'},
+    {label:"Pz", t:180, r:0.256, type:'EEG'},
+    {label:"P2", t:158, r:0.278, type:'EEG'},
+    {label:"P4", t:141, r:0.333, type:'EEG'},
+    {label:"P6", t:131, r:0.417, type:'EEG'},
+    {label:"P8", t:126, r:0.511, type:'EEG'},
+    {label:"P10", t:126, r:0.639, type:'EEG'},
+    {label:"PO9", t:-144, r:0.639, type:'EEG'},
+    {label:"PO7", t:-144, r:0.511, type:'EEG'},
+    {label:"PO3", t:-157, r:0.411, type:'EEG'},
+    {label:"POz", t:180, r:0.383, type:'EEG'},
+    {label:"PO4", t:157, r:0.411, type:'EEG'},
+    {label:"PO8", t:144, r:0.511, type:'EEG'},
+    {label:"PO10", t:144, r:0.639, type:'EEG'},
+    {label:"O1", t:-162, r:0.511, type:'EEG'},
+    {label:"Oz", t:180, r:0.511, type:'EEG'},
+    {label:"O2", t:162, r:0.511, type:'EEG'},
+    {label:"O9", t:-162, r:0.639, type:'EEG'},
+    {label:"O10", t:162, r:0.639, type:'EEG'},
+    {label:"CB1", t:-135, r:0.722, type:'EEG'},
+    {label:"CB2", t:135, r:0.722, type:'EEG'},
+    {label:"Iz", t:180, r:0.639, type:'EEG'}
+].map(d => ({
+    label: d.label,
+    type: d.type,
+    x: centerX + d.r * Math.sin(d.t * Math.PI / 180) * scale,
+    y: centerY - d.r * Math.cos(d.t * Math.PI / 180) * scale
+}));
+
+let draggingNode = null;
+
+function getFnirsLinks() {
+    const sources = new Map();
+    const detectors = new Map();
+
+    nodes.forEach(node => {
+        if (node.type !== 'fNIRS') return;
+
+        const match = node.label.trim().match(/^([sSdD])\s*[-_]?(\d+)$/);
+        if (!match) return;
+
+        const role = match[1].toUpperCase();
+        const id = match[2];
+
+        if (role === 'S') {
+            sources.set(id, node);
+        } else {
+            detectors.set(id, node);
+        }
+    });
+
+    return Array.from(sources.entries())
+        .filter(([id]) => detectors.has(id))
+        .map(([id, source]) => ({
+            id,
+            source,
+            detector: detectors.get(id)
+        }));
+}
+
+function getNodeColor(node) {
+    if (node.type === 'EEG') return '#000000';
+    if (node.type !== 'fNIRS') return '#ff4757';
+
+    const label = node.label.trim();
+    if (/^s[\s_-]?\d+/i.test(label)) return '#ff3b30';
+    if (/^d[\s_-]?\d+/i.test(label)) return '#007aff';
+    return '#ff4757';
+}
+
+function getNodeRole(node) {
+    if (node.type === 'EEG') return 'eeg';
+    const label = node.label.trim();
+    if (/^s[\s_-]?\d+/i.test(label)) return 'source';
+    if (/^d[\s_-]?\d+/i.test(label)) return 'detector';
+    return 'source';
+}
+
+function getNodeStyle(node) {
+    const role = getNodeRole(node);
+    if (role === 'eeg') return eegStyleSelect.value;
+    if (role === 'source') return sourceStyleSelect.value;
+    return detectorStyleSelect.value;
+}
+
+function updateNodeList() {
+    const nodeList = document.getElementById('nodeList');
+    const eegCount = nodes.filter(node => node.type === 'EEG').length;
+    const fnirsCount = nodes.filter(node => node.type === 'fNIRS').length;
+    const linkCount = getFnirsLinks().length;
+
+    nodeList.innerHTML = `
+        <strong>当前节点</strong><br>
+        EEG: ${eegCount}<br>
+        fNIRS: ${fnirsCount}<br>
+        已自动连线: ${linkCount}
+    `;
+}
+
+function triggerImport() {
+    positionFileInput.value = '';
+    positionFileInput.click();
+}
+
+function parseDelimitedLine(line) {
+    return line.trim().split(/[\t,\s]+/).filter(Boolean);
+}
+
+function getColumnIndex(header, aliases) {
+    const lowered = header.map(item => item.toLowerCase());
+    return lowered.findIndex(item => aliases.includes(item));
+}
+
+function buildNodeFromPolar(label, theta, radius, type) {
+    return {
+        label,
+        type,
+        x: centerX + radius * Math.sin(theta * Math.PI / 180) * scale,
+        y: centerY - radius * Math.cos(theta * Math.PI / 180) * scale
+    };
+}
+
+function parsePositionFile(text, type) {
+    const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    if (!lines.length) {
+        throw new Error('文件为空');
+    }
+
+    const header = parseDelimitedLine(lines[0]);
+    const labelIdx = getColumnIndex(header, ['labels', 'label', 'name', 'channel', 'chan']);
+    const thetaIdx = getColumnIndex(header, ['theta', 'angle']);
+    const radiusIdx = getColumnIndex(header, ['radius', 'r']);
+    const xIdx = getColumnIndex(header, ['x']);
+    const yIdx = getColumnIndex(header, ['y']);
+
+    const parsedNodes = [];
+
+    for (const line of lines.slice(1)) {
+        const parts = parseDelimitedLine(line);
+        if (!parts.length) continue;
+
+        const label = labelIdx >= 0 ? parts[labelIdx] : parts[1];
+        if (!label) continue;
+
+        if (thetaIdx >= 0 && radiusIdx >= 0) {
+            const theta = Number(parts[thetaIdx]);
+            const radius = Number(parts[radiusIdx]);
+            if (Number.isFinite(theta) && Number.isFinite(radius)) {
+                parsedNodes.push(buildNodeFromPolar(label, theta, radius, type));
+                continue;
+            }
+        }
+
+        if (xIdx >= 0 && yIdx >= 0) {
+            const rawX = Number(parts[xIdx]);
+            const rawY = Number(parts[yIdx]);
+            if (Number.isFinite(rawX) && Number.isFinite(rawY)) {
+                parsedNodes.push({
+                    label,
+                    type,
+                    x: centerX + rawX * scale,
+                    y: centerY - rawY * scale
+                });
+            }
+        }
+    }
+
+    if (!parsedNodes.length) {
+        throw new Error('未识别到可用坐标。请确认文件包含 labels+theta+radius 或 labels+x+y 列');
+    }
+
+    return parsedNodes;
+}
+
+headSizeSlider.addEventListener('input', (event) => {
+    headRadius = Number(event.target.value);
+    headSizeValue.textContent = String(headRadius);
+    draw();
+});
+
+[eegStyleSelect, sourceStyleSelect, detectorStyleSelect].forEach(select => {
+    select.addEventListener('change', draw);
+});
+
+nodeRadiusSlider.addEventListener('input', (event) => {
+    nodeRadius = Number(event.target.value);
+    nodeRadiusValue.textContent = String(nodeRadius);
+    draw();
+});
+
+outlineWidthSlider.addEventListener('input', (event) => {
+    outlineWidth = Number(event.target.value);
+    outlineWidthValue.textContent = outlineWidth.toFixed(1);
+    draw();
+});
+
+labelSizeSlider.addEventListener('input', (event) => {
+    labelFontSize = Number(event.target.value);
+    labelSizeValue.textContent = String(labelFontSize);
+    draw();
+});
+
+function draw() {
+    ctx.clearRect(0, 0, canvasSize, canvasSize);
+
+    // 绘制头部轮廓
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, headRadius, 0, Math.PI * 2);
+    ctx.strokeStyle = '#ddd';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // 绘制鼻子
+    ctx.beginPath();
+    ctx.moveTo(centerX - headRadius * 0.09, centerY - headRadius);
+    ctx.lineTo(centerX, centerY - headRadius * 1.1);
+    ctx.lineTo(centerX + headRadius * 0.09, centerY - headRadius);
+    ctx.strokeStyle = '#333';
+    ctx.stroke();
+
+    // 绘制 fNIRS 自动连线
+    getFnirsLinks().forEach(link => {
+        ctx.beginPath();
+        ctx.moveTo(link.source.x, link.source.y);
+        ctx.lineTo(link.detector.x, link.detector.y);
+        ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--link-color').trim();
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.stroke();
+    });
+    ctx.setLineDash([]);
+    ctx.lineWidth = 1;
+
+    // 绘制节点
+    nodes.forEach(node => {
+        const nodeColor = getNodeColor(node);
+        const nodeStyle = getNodeStyle(node);
+
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, nodeRadius, 0, Math.PI * 2);
+        if (node === draggingNode) {
+            ctx.fillStyle = '#2ed573';
+            ctx.fill();
+        } else if (nodeStyle === 'outline') {
+            ctx.fillStyle = '#ffffff';
+            ctx.fill();
+            ctx.lineWidth = outlineWidth;
+            ctx.strokeStyle = nodeColor;
+            ctx.stroke();
+        } else {
+            ctx.fillStyle = nodeColor;
+            ctx.fill();
+        }
+        
+        ctx.fillStyle = nodeStyle === 'outline' ? nodeColor : '#ffffff';
+        ctx.font = `bold ${labelFontSize}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(node.label, node.x, node.y);
+    });
+
+    ctx.lineWidth = 1;
+
+    updateNodeList();
+}
+
+// 增删功能
+function addNode(type) {
+    const label = document.getElementById('nodeLabel').value || (type + nodes.length);
+    nodes.push({
+        label: label,
+        type: type,
+        x: 60,
+        y: 60
+    });
+    draw();
+}
+
+function removeNodes(mode) {
+    let message = '';
+
+    if (mode === 'fNIRS') {
+        message = '确认删除全部 fNIRS 节点吗？';
+    } else if (mode === 'EEG') {
+        message = '确认删除全部 EEG 节点吗？';
+    } else {
+        message = '确认清空全部节点吗？';
+    }
+
+    if (!window.confirm(message)) return;
+
+    if (mode === 'ALL') {
+        nodes = [];
+    } else {
+        nodes = nodes.filter(node => node.type !== mode);
+    }
+
+    draggingNode = null;
+    draw();
+}
+
+positionFileInput.addEventListener('change', async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    try {
+        const fileText = await file.text();
+        const importType = document.getElementById('importNodeType').value;
+        const replaceSameType = document.getElementById('importReplace').checked;
+        const importedNodes = parsePositionFile(fileText, importType);
+
+        nodes = replaceSameType
+            ? nodes.filter(node => node.type !== importType).concat(importedNodes)
+            : nodes.concat(importedNodes);
+
+        draggingNode = null;
+        draw();
+        window.alert(`已导入 ${importedNodes.length} 个 ${importType} 节点`);
+    } catch (error) {
+        window.alert(`导入失败: ${error.message}`);
+    }
+});
+
+canvas.oncontextmenu = (e) => {
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    nodes = nodes.filter(node => Math.hypot(node.x - mx, node.y - my) > 15);
+    draw();
+};
+
+// 拖拽逻辑
+canvas.onmousedown = (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    draggingNode = nodes.find(n => Math.hypot(n.x - mx, n.y - my) < 20);
+};
+
+window.onmousemove = (e) => {
+    if (draggingNode) {
+        const rect = canvas.getBoundingClientRect();
+        draggingNode.x = e.clientX - rect.left;
+        draggingNode.y = e.clientY - rect.top;
+        draw();
+    }
+};
+
+window.onmouseup = () => { draggingNode = null; };
+
+// 导出高清 PDF
+async function exportPDF() {
+    const { jsPDF } = window.jspdf;
+    const element = document.getElementById('captureArea');
+    
+    const canvasImg = await html2canvas(element, { scale: 3 }); // 3倍采样保证高清
+    const imgData = canvasImg.toDataURL('image/png');
+    
+    const pdf = new jsPDF('p', 'mm', 'a4');
+    const imgProps = pdf.getImageProperties(imgData);
+    const pdfWidth = pdf.internal.pageSize.getWidth();
+    const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
+    
+    pdf.addImage(imgData, 'PNG', 0, 10, pdfWidth, pdfHeight);
+    pdf.save(`EEG_fNIRS_Layout_${new Date().getTime()}.pdf`);
+}
+
+async function exportPNG() {
+    const element = document.getElementById('captureArea');
+    const canvasImg = await html2canvas(element, { scale: 3 });
+    const imgData = canvasImg.toDataURL('image/png');
+    const link = document.createElement('a');
+    link.href = imgData;
+    link.download = `EEG_fNIRS_Layout_${new Date().getTime()}.png`;
+    link.click();
+}
+
+draw();
+</script>
+</body>
+</html>

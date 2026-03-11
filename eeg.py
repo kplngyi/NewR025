@@ -449,6 +449,8 @@ while top_k >= MIN_TOP_K:
                 'test_acc': float(test_acc),
                 'fisher_method': fisher_method_tag,
                 'selected_channel_idx': selected_channels,
+                'selected_channel_scores': [float(s) for s in channel_scores[selected_channels]],
+                'all_channel_scores': [float(s) for s in channel_scores],
                 'selected_channel_names': selected_channel_names,
             }
             global_results.append(result_entry)

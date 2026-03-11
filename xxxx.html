@@ -1,0 +1,985 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>EEG-fNIRS 多模态电极编辑器</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <style>
+        :root { --eeg-color: #000000; --fnirs-source-color: #ff3b30; --fnirs-detector-color: #007aff; --fnirs-color: #ff4757; --link-color: #ff6b81; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f4f7f6; display: flex; margin: 0; height: 100vh; }
+        #sidebar { width: 300px; background: white; padding: 20px; box-shadow: 2px 0 10px rgba(0,0,0,0.1); z-index: 10; overflow-y: auto; }
+        #canvas-container { flex-grow: 1; display: flex; justify-content: center; align-items: center; position: relative; }
+        .canvas-wrapper { background: white; padding: 40px; border-radius: 8px; box-shadow: 0 4px 30px rgba(0,0,0,0.1); position: relative; }
+        canvas { cursor: crosshair; display: block; width: 700px; height: 700px; }
+        h2 { font-size: 1.2rem; border-bottom: 2px solid #eee; padding-bottom: 10px; }
+        .control-group { margin-bottom: 20px; }
+        label { display: block; font-size: 0.9rem; margin-bottom: 5px; color: #666; }
+        input, select { width: 100%; padding: 8px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+        .btn-stack { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        button { padding: 10px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; transition: 0.2s; }
+        .btn-add-eeg { background: var(--eeg-color); color: white; }
+        .btn-add-fnirs { background: var(--fnirs-color); color: white; }
+        .btn-export { background: #2ed573; color: white; margin-top: 10px; }
+        .btn-danger { background: #ff6b6b; color: white; }
+        button:hover { opacity: 0.8; transform: translateY(-1px); }
+        .legend { margin-top: 20px; font-size: 0.85rem; }
+        .legend-item { display: flex; align-items: center; margin-bottom: 5px; }
+        .dot { width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; }
+        .help-text { color:#999; font-size: 0.8rem; line-height: 1.5; }
+        .setting-row { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding:12px; margin-top:10px; border:1px solid #e6e6e6; border-radius:10px; background:#fafafa; }
+        .setting-copy { flex:1; }
+        .setting-title { font-size:0.92rem; font-weight:600; color:#333; margin-bottom:4px; }
+        .setting-desc { font-size:0.78rem; color:#8a8a8a; line-height:1.45; }
+        .setting-check { width:auto; margin:2px 0 0 0; transform:scale(1.1); accent-color:#222; }
+        .setting-row.danger .setting-check { accent-color:#ff6b6b; }
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <h2>电极控制面板</h2>
+    
+    <div class="control-group">
+        <label>标签名称</label>
+        <input type="text" id="nodeLabel" placeholder="例如: S1, D1, Cz...">
+        <label>批量标签</label>
+        <input type="text" id="batchNodeLabels" placeholder="例如: Cz,Pz,Fz 或 S1,D1,S2,D2">
+        <label>类型</label>
+        <select id="nodeType">
+            <option value="EEG">EEG (电极)</option>
+            <option value="fNIRS">fNIRS (光源/检测器)</option>
+        </select>
+        <label>导入为</label>
+        <select id="importNodeType">
+            <option value="EEG">EEG</option>
+            <option value="fNIRS">fNIRS</option>
+        </select>
+        <p class="help-text">* 导入时会优先自动识别 EEG 或 fNIRS；此选项仅作为兜底类型</p>
+        <div class="btn-stack">
+            <button class="btn-add-eeg" onclick="addNode('EEG')">添加 EEG</button>
+            <button class="btn-add-fnirs" onclick="addNode('fNIRS')">添加 fNIRS</button>
+            <button class="btn-add-eeg" onclick="addBatchNodes()">批量添加</button>
+            <button class="btn-add-eeg" onclick="triggerImport()">导入定位文件</button>
+            <button class="btn-export" onclick="exportPDF()">导出 PDF</button>
+            <button class="btn-export" onclick="exportPNG()">导出 PNG</button>
+            <button class="btn-export" onclick="exportCED()">导出 CED</button>
+        </div>
+        <label class="setting-row" for="importReplace">
+            <span class="setting-copy">
+                <span class="setting-title">覆盖同类型节点</span>
+                <span class="setting-desc">开启后导入会替换当前同类型节点；关闭后会把新节点追加到现有布局。</span>
+            </span>
+            <input class="setting-check" type="checkbox" id="importReplace" checked>
+        </label>
+        <input type="file" id="positionFileInput" accept=".ced,.txt,.tsv,.csv" style="display:none">
+    </div>
+
+    <div class="control-group">
+        <h2>删除模式</h2>
+        <label class="setting-row danger" for="deleteMode">
+            <span class="setting-copy">
+                <span class="setting-title">删除模式</span>
+                <span class="setting-desc">开启后左键点击节点会直接删除；关闭后左键恢复为拖拽节点。</span>
+            </span>
+            <input class="setting-check" type="checkbox" id="deleteMode">
+        </label>
+        <label class="setting-row" for="mirrorMode">
+            <span class="setting-copy">
+                <span class="setting-title">镜像辅助</span>
+                <span class="setting-desc">开启后，拖动成对的左右节点时，对侧节点会按中线自动镜像移动。</span>
+            </span>
+            <input class="setting-check" type="checkbox" id="mirrorMode" checked>
+        </label>
+    </div>
+
+    <div class="control-group">
+        <h2>头轮廓大小</h2>
+        <label for="headSizeSlider">轮廓半径: <span id="headSizeValue">302</span></label>
+        <input type="range" id="headSizeSlider" min="120" max="320" step="1" value="302">
+        <p class="help-text">* 只改变头部轮廓和鼻子大小，不改变电极位置</p>
+    </div>
+
+    <div class="control-group">
+        <h2>圆圈风格</h2>
+        <label>EEG 电极</label>
+        <select id="eegStyle">
+            <option value="solid">实心黑色圆圈</option>
+            <option value="outline" selected>空心黑色圆圈</option>
+        </select>
+        <label>发射探头（S）</label>
+        <select id="sourceStyle">
+            <option value="solid" selected>实心红色圆圈</option>
+            <option value="outline">空心红色圆圈</option>
+        </select>
+        <label>接收探头（D）</label>
+        <select id="detectorStyle">
+            <option value="solid" selected>实心蓝色圆圈</option>
+            <option value="outline">空心蓝色圆圈</option>
+        </select>
+        <label for="nodeRadiusSlider">圆圈大小: <span id="nodeRadiusValue">17</span></label>
+        <input type="range" id="nodeRadiusSlider" min="6" max="24" step="1" value="17">
+        <label for="outlineWidthSlider">边框粗细: <span id="outlineWidthValue">1.2</span></label>
+        <input type="range" id="outlineWidthSlider" min="0.5" max="3" step="0.1" value="1.2">
+        <label for="labelSizeSlider">电极名称大小: <span id="labelSizeValue">14</span></label>
+        <input type="range" id="labelSizeSlider" min="6" max="16" step="1" value="14">
+        <p class="help-text">* 切换后会立即应用到当前所有节点</p>
+    </div>
+
+    <div class="control-group">
+        <h2>自动连线</h2>
+        <label for="fnirsLinkMode">连线模式</label>
+        <select id="fnirsLinkMode">
+            <option value="off">关闭</option>
+            <option value="same_id">同编号 S-D 连线</option>
+            <option value="custom_pairs" selected>固定脑氧通道连线</option>
+        </select>
+        <p class="help-text">* 固定脑氧通道连线会按你提供的 CH1-CH44 配对关系自动连线</p>
+    </div>
+
+    <div class="legend">
+        <strong>图例:</strong>
+        <div class="legend-item"><div class="dot" style="background:var(--eeg-color)"></div> EEG 节点</div>
+        <div class="legend-item"><div class="dot" style="background:var(--fnirs-source-color)"></div> fNIRS 发射探头（`S*`）</div>
+        <div class="legend-item"><div class="dot" style="background:var(--fnirs-detector-color)"></div> fNIRS 接收探头（`D*`）</div>
+        <p class="help-text">* 右键点击电极可将其删除</p>
+        <p class="help-text">* 识别到以 `S` 开头的标签时按发射探头显示，`D` 开头时按接收探头显示</p>
+        <p class="help-text">* fNIRS 使用 `S1 / D1`、`S2 / D2` 这类命名时，会按相同编号自动连线</p>
+    </div>
+
+    <div class="control-group">
+        <h2>批量删除</h2>
+        <div class="btn-stack">
+            <button class="btn-danger" onclick="removeNodes('fNIRS')">删除全部 fNIRS</button>
+            <button class="btn-danger" onclick="removeNodes('EEG')">删除全部 EEG</button>
+            <button class="btn-danger btn-export" onclick="removeNodes('ALL')">清空全部节点</button>
+        </div>
+    </div>
+
+    <div id="nodeList" style="margin-top:20px; font-size:0.8rem; color:#666;">
+        </div>
+</div>
+
+<div id="canvas-container">
+    <div class="canvas-wrapper" id="captureArea">
+        <canvas id="eegCanvas"></canvas>
+    </div>
+</div>
+
+<script>
+const canvas = document.getElementById('eegCanvas');
+const ctx = canvas.getContext('2d');
+const canvasSize = 700;
+const devicePixelRatioScale = window.devicePixelRatio || 1;
+canvas.width = canvasSize * devicePixelRatioScale;
+canvas.height = canvasSize * devicePixelRatioScale;
+canvas.style.width = `${canvasSize}px`;
+canvas.style.height = `${canvasSize}px`;
+ctx.scale(devicePixelRatioScale, devicePixelRatioScale);
+const centerX = canvasSize / 2;
+const centerY = canvasSize / 2;
+const scale = 450;
+const positionFileInput = document.getElementById('positionFileInput');
+const deleteModeCheckbox = document.getElementById('deleteMode');
+const mirrorModeCheckbox = document.getElementById('mirrorMode');
+const headSizeSlider = document.getElementById('headSizeSlider');
+const headSizeValue = document.getElementById('headSizeValue');
+const eegStyleSelect = document.getElementById('eegStyle');
+const sourceStyleSelect = document.getElementById('sourceStyle');
+const detectorStyleSelect = document.getElementById('detectorStyle');
+const nodeRadiusSlider = document.getElementById('nodeRadiusSlider');
+const nodeRadiusValue = document.getElementById('nodeRadiusValue');
+const outlineWidthSlider = document.getElementById('outlineWidthSlider');
+const outlineWidthValue = document.getElementById('outlineWidthValue');
+const labelSizeSlider = document.getElementById('labelSizeSlider');
+const labelSizeValue = document.getElementById('labelSizeValue');
+const fnirsLinkModeSelect = document.getElementById('fnirsLinkMode');
+let headRadius = 302;
+let nodeRadius = 17;
+let outlineWidth = 1.2;
+let labelFontSize = 14;
+
+const customFnirsPairs = [
+    ['S1', 'D1'], ['S1', 'D2'], ['S2', 'D1'], ['S2', 'D2'], ['S2', 'D3'],
+    ['S3', 'D2'], ['S3', 'D3'], ['S4', 'D3'], ['S4', 'D4'], ['S5', 'D3'],
+    ['S5', 'D4'], ['S5', 'D5'], ['S6', 'D4'], ['S6', 'D5'],
+    ['S14', 'D11'], ['S14', 'D13'], ['S13', 'D11'], ['S13', 'D12'], ['S15', 'D11'],
+    ['S15', 'D13'], ['S15', 'D12'], ['S15', 'D14'], ['S17', 'D13'], ['S17', 'D14'],
+    ['S16', 'D12'], ['S16', 'D14'], ['S16', 'D15'], ['S18', 'D14'], ['S18', 'D15'],
+    ['S8', 'D6'], ['S8', 'D8'], ['S7', 'D6'], ['S7', 'D7'], ['S9', 'D6'],
+    ['S9', 'D8'], ['S9', 'D7'], ['S9', 'D9'], ['S11', 'D8'], ['S11', 'D9'],
+    ['S11', 'D10'], ['S10', 'D7'], ['S10', 'D9'], ['S12', 'D9'], ['S12', 'D10']
+];
+
+const fnirsMirrorMap = new Map([
+    ['S4', 'S3'], ['S3', 'S4'],
+    ['S5', 'S2'], ['S2', 'S5'],
+    ['S6', 'S1'], ['S1', 'S6'],
+    ['S13', 'S8'], ['S8', 'S13'],
+    ['S14', 'S7'], ['S7', 'S14'],
+    ['S15', 'S9'], ['S9', 'S15'],
+    ['S16', 'S11'], ['S11', 'S16'],
+    ['S17', 'S10'], ['S10', 'S17'],
+    ['S18', 'S12'], ['S12', 'S18'],
+    ['D4', 'D2'], ['D2', 'D4'],
+    ['D5', 'D1'], ['D1', 'D5'],
+    ['D11', 'D6'], ['D6', 'D11'],
+    ['D12', 'D8'], ['D8', 'D12'],
+    ['D13', 'D7'], ['D7', 'D13'],
+    ['D14', 'D9'], ['D9', 'D14'],
+    ['D15', 'D10'], ['D10', 'D15']
+]);
+
+const eegMirrorMap = new Map([
+    ['FP1', 'FP2'], ['FP2', 'FP1'],
+    ['AF7', 'AF8'], ['AF8', 'AF7'],
+    ['AF3', 'AF4'], ['AF4', 'AF3'],
+    ['F7', 'F8'], ['F8', 'F7'],
+    ['F5', 'F6'], ['F6', 'F5'],
+    ['F3', 'F4'], ['F4', 'F3'],
+    ['F1', 'F2'], ['F2', 'F1'],
+    ['FC5', 'FC6'], ['FC6', 'FC5'],
+    ['FC3', 'FC4'], ['FC4', 'FC3'],
+    ['FC1', 'FC2'], ['FC2', 'FC1'],
+    ['C5', 'C6'], ['C6', 'C5'],
+    ['C3', 'C4'], ['C4', 'C3'],
+    ['C1', 'C2'], ['C2', 'C1'],
+    ['FT9', 'FT10'], ['FT10', 'FT9'],
+    ['FT7', 'FT8'], ['FT8', 'FT7'],
+    ['T7', 'T8'], ['T8', 'T7'],
+    ['TP9', 'TP10'], ['TP10', 'TP9'],
+    ['TP7', 'TP8'], ['TP8', 'TP7'],
+    ['CP5', 'CP6'], ['CP6', 'CP5'],
+    ['CP3', 'CP4'], ['CP4', 'CP3'],
+    ['CP1', 'CP2'], ['CP2', 'CP1'],
+    ['P7', 'P8'], ['P8', 'P7'],
+    ['P5', 'P6'], ['P6', 'P5'],
+    ['P3', 'P4'], ['P4', 'P3'],
+    ['P1', 'P2'], ['P2', 'P1'],
+    ['PO7', 'PO8'], ['PO8', 'PO7'],
+    ['PO3', 'PO4'], ['PO4', 'PO3'],
+    ['O1', 'O2'], ['O2', 'O1']
+]);
+
+// 初始 EEG 数据由 Standard-10-20-Cap81.ced 生成
+let nodes = [
+    {label:"Fp1", t:-18, r:0.511, type:'EEG'},
+    {label:"Fpz", t:0, r:0.511, type:'EEG'},
+    {label:"Fp2", t:18, r:0.511, type:'EEG'},
+    {label:"Nz", t:0, r:0.622, type:'EEG'},
+    {label:"AF9", t:-43, r:0.639, type:'EEG'},
+    {label:"AF7", t:-38, r:0.511, type:'EEG'},
+    {label:"AF3", t:-23, r:0.411, type:'EEG'},
+    {label:"AFz", t:0, r:0.383, type:'EEG'},
+    {label:"AF4", t:23, r:0.411, type:'EEG'},
+    {label:"AF8", t:38, r:0.511, type:'EEG'},
+    {label:"AF10", t:43, r:0.639, type:'EEG'},
+    {label:"F9", t:-55, r:0.639, type:'EEG'},
+    {label:"F7", t:-54, r:0.511, type:'EEG'},
+    {label:"F5", t:-49, r:0.417, type:'EEG'},
+    {label:"F3", t:-39, r:0.333, type:'EEG'},
+    {label:"F1", t:-22, r:0.278, type:'EEG'},
+    {label:"Fz", t:0, r:0.256, type:'EEG'},
+    {label:"F2", t:22, r:0.278, type:'EEG'},
+    {label:"F4", t:39, r:0.333, type:'EEG'},
+    {label:"F6", t:49, r:0.417, type:'EEG'},
+    {label:"F8", t:54, r:0.511, type:'EEG'},
+    {label:"F10", t:55, r:0.639, type:'EEG'},
+    {label:"FT9", t:-72, r:0.639, type:'EEG'},
+    {label:"FT7", t:-72, r:0.511, type:'EEG'},
+    {label:"FC5", t:-69, r:0.394, type:'EEG'},
+    {label:"FC3", t:-62, r:0.278, type:'EEG'},
+    {label:"FC1", t:-45, r:0.178, type:'EEG'},
+    {label:"FCz", t:0, r:0.128, type:'EEG'},
+    {label:"FC2", t:45, r:0.178, type:'EEG'},
+    {label:"FC4", t:62, r:0.278, type:'EEG'},
+    {label:"FC6", t:69, r:0.394, type:'EEG'},
+    {label:"FT8", t:72, r:0.511, type:'EEG'},
+    {label:"FT10", t:72, r:0.639, type:'EEG'},
+    {label:"T9", t:-90, r:0.639, type:'EEG'},
+    {label:"T7", t:-90, r:0.511, type:'EEG'},
+    {label:"C5", t:-90, r:0.383, type:'EEG'},
+    {label:"C3", t:-90, r:0.256, type:'EEG'},
+    {label:"C1", t:-90, r:0.128, type:'EEG'},
+    {label:"Cz", t:90, r:0, type:'EEG'},
+    {label:"C2", t:90, r:0.128, type:'EEG'},
+    {label:"C4", t:90, r:0.256, type:'EEG'},
+    {label:"C6", t:90, r:0.383, type:'EEG'},
+    {label:"T8", t:90, r:0.511, type:'EEG'},
+    {label:"T10", t:90, r:0.639, type:'EEG'},
+    {label:"TP9", t:-108, r:0.639, type:'EEG'},
+    {label:"TP7", t:-108, r:0.511, type:'EEG'},
+    {label:"CP5", t:-111, r:0.394, type:'EEG'},
+    {label:"CP3", t:-118, r:0.278, type:'EEG'},
+    {label:"CP1", t:-135, r:0.178, type:'EEG'},
+    {label:"CPz", t:180, r:0.128, type:'EEG'},
+    {label:"CP2", t:135, r:0.178, type:'EEG'},
+    {label:"CP4", t:118, r:0.278, type:'EEG'},
+    {label:"CP6", t:111, r:0.394, type:'EEG'},
+    {label:"TP8", t:108, r:0.511, type:'EEG'},
+    {label:"TP10", t:108, r:0.639, type:'EEG'},
+    {label:"P9", t:-126, r:0.639, type:'EEG'},
+    {label:"P7", t:-126, r:0.511, type:'EEG'},
+    {label:"P5", t:-131, r:0.417, type:'EEG'},
+    {label:"P3", t:-141, r:0.333, type:'EEG'},
+    {label:"P1", t:-158, r:0.278, type:'EEG'},
+    {label:"Pz", t:180, r:0.256, type:'EEG'},
+    {label:"P2", t:158, r:0.278, type:'EEG'},
+    {label:"P4", t:141, r:0.333, type:'EEG'},
+    {label:"P6", t:131, r:0.417, type:'EEG'},
+    {label:"P8", t:126, r:0.511, type:'EEG'},
+    {label:"P10", t:126, r:0.639, type:'EEG'},
+    {label:"PO9", t:-144, r:0.639, type:'EEG'},
+    {label:"PO7", t:-144, r:0.511, type:'EEG'},
+    {label:"PO3", t:-157, r:0.411, type:'EEG'},
+    {label:"POz", t:180, r:0.383, type:'EEG'},
+    {label:"PO4", t:157, r:0.411, type:'EEG'},
+    {label:"PO8", t:144, r:0.511, type:'EEG'},
+    {label:"PO10", t:144, r:0.639, type:'EEG'},
+    {label:"O1", t:-162, r:0.511, type:'EEG'},
+    {label:"Oz", t:180, r:0.511, type:'EEG'},
+    {label:"O2", t:162, r:0.511, type:'EEG'},
+    {label:"O9", t:-162, r:0.639, type:'EEG'},
+    {label:"O10", t:162, r:0.639, type:'EEG'},
+    {label:"CB1", t:-135, r:0.722, type:'EEG'},
+    {label:"CB2", t:135, r:0.722, type:'EEG'},
+    {label:"Iz", t:180, r:0.639, type:'EEG'}
+].map(d => ({
+    label: d.label,
+    type: d.type,
+    x: centerX + d.r * Math.sin(d.t * Math.PI / 180) * scale,
+    y: centerY - d.r * Math.cos(d.t * Math.PI / 180) * scale
+}));
+
+let draggingNode = null;
+let undoStack = [];
+let dragStartSnapshot = null;
+
+function cloneNodes(nodeList) {
+    return nodeList.map(node => ({ ...node }));
+}
+
+function saveState() {
+    undoStack.push(cloneNodes(nodes));
+    if (undoStack.length > 100) {
+        undoStack.shift();
+    }
+}
+
+function undo() {
+    if (!undoStack.length) return;
+    nodes = undoStack.pop();
+    draggingNode = null;
+    dragStartSnapshot = null;
+    draw();
+}
+
+function normalizeNodeLabel(label) {
+    return label.trim().toUpperCase().replace(/[\s_-]+/g, '');
+}
+
+function getMirrorLabel(label) {
+    const normalized = normalizeNodeLabel(label);
+
+    if (fnirsMirrorMap.has(normalized)) {
+        return fnirsMirrorMap.get(normalized);
+    }
+
+    // fNIRS labels must use the explicit mirror table only.
+    if (/^[SD]\d+$/.test(normalized)) {
+        return null;
+    }
+
+    if (eegMirrorMap.has(normalized)) {
+        return eegMirrorMap.get(normalized);
+    }
+
+    // EEG labels should use the explicit mirror table only.
+    if (/^[A-Z]+\d+$/.test(normalized)) {
+        return null;
+    }
+
+    const match = normalized.match(/^(.*?)(\d+)$/);
+    if (!match) return null;
+
+    const prefix = match[1];
+    const number = Number(match[2]);
+    if (!Number.isFinite(number) || number <= 0) return null;
+    if (number === 0 || prefix.endsWith('Z')) return null;
+
+    if (number % 2 === 1) return `${prefix}${number + 1}`;
+    return `${prefix}${number - 1}`;
+}
+
+function getMirrorNode(node) {
+    const mirrorLabel = getMirrorLabel(node.label);
+    if (!mirrorLabel) return null;
+
+    return nodes.find(candidate =>
+        candidate !== node &&
+        candidate.type === node.type &&
+        normalizeNodeLabel(candidate.label) === mirrorLabel
+    ) || null;
+}
+
+function getFnirsLinks() {
+    const mode = fnirsLinkModeSelect.value;
+    if (mode === 'off') return [];
+
+    const fnirsNodes = nodes.filter(node => node.type === 'fNIRS');
+    const normalizedMap = new Map(fnirsNodes.map(node => [normalizeNodeLabel(node.label), node]));
+
+    if (mode === 'custom_pairs') {
+        return customFnirsPairs
+            .map(([sourceId, detectorId], index) => {
+                const source = normalizedMap.get(sourceId);
+                const detector = normalizedMap.get(detectorId);
+                if (!source || !detector) return null;
+                return { id: `CH${index + 1}`, source, detector };
+            })
+            .filter(Boolean);
+    }
+
+    const sources = new Map();
+    const detectors = new Map();
+
+    fnirsNodes.forEach(node => {
+        const match = node.label.trim().match(/^([sSdD])\s*[-_]?(\d+)$/);
+        if (!match) return;
+
+        const role = match[1].toUpperCase();
+        const id = match[2];
+
+        if (role === 'S') {
+            sources.set(id, node);
+        } else {
+            detectors.set(id, node);
+        }
+    });
+
+    return Array.from(sources.entries())
+        .filter(([id]) => detectors.has(id))
+        .map(([id, source]) => ({
+            id,
+            source,
+            detector: detectors.get(id)
+        }));
+}
+
+function getNodeColor(node) {
+    if (node.type === 'EEG') return '#000000';
+    if (node.type !== 'fNIRS') return '#ff4757';
+
+    const label = node.label.trim();
+    if (/^s[\s_-]?\d+/i.test(label)) return '#ff3b30';
+    if (/^d[\s_-]?\d+/i.test(label)) return '#007aff';
+    return '#ff4757';
+}
+
+function getNodeRole(node) {
+    if (node.type === 'EEG') return 'eeg';
+    const label = node.label.trim();
+    if (/^s[\s_-]?\d+/i.test(label)) return 'source';
+    if (/^d[\s_-]?\d+/i.test(label)) return 'detector';
+    return 'source';
+}
+
+function getNodeStyle(node) {
+    const role = getNodeRole(node);
+    if (role === 'eeg') return eegStyleSelect.value;
+    if (role === 'source') return sourceStyleSelect.value;
+    return detectorStyleSelect.value;
+}
+
+function updateNodeList() {
+    const nodeList = document.getElementById('nodeList');
+    const eegCount = nodes.filter(node => node.type === 'EEG').length;
+    const fnirsCount = nodes.filter(node => node.type === 'fNIRS').length;
+    const linkCount = getFnirsLinks().length;
+
+    nodeList.innerHTML = `
+        <strong>当前节点</strong><br>
+        EEG: ${eegCount}<br>
+        fNIRS: ${fnirsCount}<br>
+        已自动连线: ${linkCount}
+    `;
+}
+
+function triggerImport() {
+    positionFileInput.value = '';
+    positionFileInput.click();
+}
+
+function parseDelimitedLine(line) {
+    return line.trim().split(/[\t,\s]+/).filter(Boolean);
+}
+
+function getColumnIndex(header, aliases) {
+    const lowered = header.map(item => item.toLowerCase());
+    return lowered.findIndex(item => aliases.includes(item));
+}
+
+function inferNodeType(label, fallbackType) {
+    const normalized = normalizeNodeLabel(label);
+    if (/^S\d+$/.test(normalized) || /^D\d+$/.test(normalized)) {
+        return 'fNIRS';
+    }
+    return fallbackType || 'EEG';
+}
+
+function buildNodeFromPolar(label, theta, radius, type) {
+    return {
+        label,
+        type,
+        x: centerX + radius * Math.sin(theta * Math.PI / 180) * scale,
+        y: centerY - radius * Math.cos(theta * Math.PI / 180) * scale
+    };
+}
+
+function parsePositionFile(text, fallbackType) {
+    const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    if (!lines.length) {
+        throw new Error('文件为空');
+    }
+
+    const header = parseDelimitedLine(lines[0]);
+    const labelIdx = getColumnIndex(header, ['labels', 'label', 'name', 'channel', 'chan']);
+    const thetaIdx = getColumnIndex(header, ['theta', 'angle']);
+    const radiusIdx = getColumnIndex(header, ['radius', 'r']);
+    const xIdx = getColumnIndex(header, ['x']);
+    const yIdx = getColumnIndex(header, ['y']);
+
+    const parsedNodes = [];
+    const importedTypes = new Set();
+
+    for (const line of lines.slice(1)) {
+        const parts = parseDelimitedLine(line);
+        if (!parts.length) continue;
+
+        const label = labelIdx >= 0 ? parts[labelIdx] : parts[1];
+        if (!label) continue;
+        const type = inferNodeType(label, fallbackType);
+        importedTypes.add(type);
+
+        if (thetaIdx >= 0 && radiusIdx >= 0) {
+            const theta = Number(parts[thetaIdx]);
+            const radius = Number(parts[radiusIdx]);
+            if (Number.isFinite(theta) && Number.isFinite(radius)) {
+                parsedNodes.push(buildNodeFromPolar(label, theta, radius, type));
+                continue;
+            }
+        }
+
+        if (xIdx >= 0 && yIdx >= 0) {
+            const rawX = Number(parts[xIdx]);
+            const rawY = Number(parts[yIdx]);
+            if (Number.isFinite(rawX) && Number.isFinite(rawY)) {
+                parsedNodes.push({
+                    label,
+                    type,
+                    x: centerX + rawX * scale,
+                    y: centerY - rawY * scale
+                });
+            }
+        }
+    }
+
+    if (!parsedNodes.length) {
+        throw new Error('未识别到可用坐标。请确认文件包含 labels+theta+radius 或 labels+x+y 列');
+    }
+
+    return {
+        nodes: parsedNodes,
+        importedTypes: Array.from(importedTypes)
+    };
+}
+
+headSizeSlider.addEventListener('input', (event) => {
+    headRadius = Number(event.target.value);
+    headSizeValue.textContent = String(headRadius);
+    draw();
+});
+
+[eegStyleSelect, sourceStyleSelect, detectorStyleSelect].forEach(select => {
+    select.addEventListener('change', draw);
+});
+
+nodeRadiusSlider.addEventListener('input', (event) => {
+    nodeRadius = Number(event.target.value);
+    nodeRadiusValue.textContent = String(nodeRadius);
+    draw();
+});
+
+outlineWidthSlider.addEventListener('input', (event) => {
+    outlineWidth = Number(event.target.value);
+    outlineWidthValue.textContent = outlineWidth.toFixed(1);
+    draw();
+});
+
+labelSizeSlider.addEventListener('input', (event) => {
+    labelFontSize = Number(event.target.value);
+    labelSizeValue.textContent = String(labelFontSize);
+    draw();
+});
+
+fnirsLinkModeSelect.addEventListener('change', draw);
+
+function draw() {
+    ctx.clearRect(0, 0, canvasSize, canvasSize);
+
+    if (mirrorModeCheckbox.checked) {
+        ctx.beginPath();
+        ctx.moveTo(centerX, centerY - headRadius * 1.1);
+        ctx.lineTo(centerX, centerY + headRadius * 1.1);
+        ctx.strokeStyle = '#e7e7e7';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 6]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
+
+    // 绘制头部轮廓
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, headRadius, 0, Math.PI * 2);
+    ctx.strokeStyle = '#ddd';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // 绘制鼻子
+    ctx.beginPath();
+    ctx.moveTo(centerX - headRadius * 0.09, centerY - headRadius);
+    ctx.lineTo(centerX, centerY - headRadius * 1.1);
+    ctx.lineTo(centerX + headRadius * 0.09, centerY - headRadius);
+    ctx.strokeStyle = '#333';
+    ctx.stroke();
+
+    // 绘制 fNIRS 自动连线
+    getFnirsLinks().forEach(link => {
+        ctx.beginPath();
+        ctx.moveTo(link.source.x, link.source.y);
+        ctx.lineTo(link.detector.x, link.detector.y);
+        ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--link-color').trim();
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.stroke();
+    });
+    ctx.setLineDash([]);
+    ctx.lineWidth = 1;
+
+    // 绘制节点
+    nodes.forEach(node => {
+        const nodeColor = getNodeColor(node);
+        const nodeStyle = getNodeStyle(node);
+
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, nodeRadius, 0, Math.PI * 2);
+        if (node === draggingNode) {
+            ctx.fillStyle = '#2ed573';
+            ctx.fill();
+        } else if (nodeStyle === 'outline') {
+            ctx.fillStyle = '#ffffff';
+            ctx.fill();
+            ctx.lineWidth = outlineWidth;
+            ctx.strokeStyle = nodeColor;
+            ctx.stroke();
+        } else {
+            ctx.fillStyle = nodeColor;
+            ctx.fill();
+        }
+        
+        ctx.fillStyle = nodeStyle === 'outline' ? nodeColor : '#ffffff';
+        ctx.font = `bold ${labelFontSize}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(node.label, node.x, node.y);
+    });
+
+    ctx.lineWidth = 1;
+
+    updateNodeList();
+}
+
+// 增删功能
+function addNode(type) {
+    const label = document.getElementById('nodeLabel').value || (type + nodes.length);
+    saveState();
+    nodes.push({
+        label: label,
+        type: type,
+        x: 60,
+        y: 60
+    });
+    draw();
+}
+
+function addBatchNodes() {
+    const input = document.getElementById('batchNodeLabels');
+    const type = document.getElementById('nodeType').value;
+    const labels = input.value
+        .split(',')
+        .map(item => item.trim())
+        .filter(Boolean);
+
+    if (!labels.length) {
+        window.alert('请输入要批量添加的电极名称，并用英文逗号分隔');
+        return;
+    }
+
+    saveState();
+    labels.forEach((label, index) => {
+        nodes.push({
+            label,
+            type,
+            x: 60 + (index % 4) * 28,
+            y: 60 + Math.floor(index / 4) * 28
+        });
+    });
+
+    input.value = '';
+    draw();
+}
+
+function removeNodes(mode) {
+    let message = '';
+
+    if (mode === 'fNIRS') {
+        message = '确认删除全部 fNIRS 节点吗？';
+    } else if (mode === 'EEG') {
+        message = '确认删除全部 EEG 节点吗？';
+    } else {
+        message = '确认清空全部节点吗？';
+    }
+
+    if (!window.confirm(message)) return;
+
+    saveState();
+    if (mode === 'ALL') {
+        nodes = [];
+    } else {
+        nodes = nodes.filter(node => node.type !== mode);
+    }
+
+    draggingNode = null;
+    draw();
+}
+
+positionFileInput.addEventListener('change', async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    try {
+        const fileText = await file.text();
+        const fallbackType = document.getElementById('importNodeType').value;
+        const replaceSameType = document.getElementById('importReplace').checked;
+        const { nodes: importedNodes, importedTypes } = parsePositionFile(fileText, fallbackType);
+
+        saveState();
+        nodes = replaceSameType
+            ? nodes.filter(node => !importedTypes.includes(node.type)).concat(importedNodes)
+            : nodes.concat(importedNodes);
+        draggingNode = null;
+        draw();
+        window.alert(`已导入 ${importedNodes.length} 个节点：${importedTypes.join(' + ')}`);
+    } catch (error) {
+        window.alert(`导入失败: ${error.message}`);
+    }
+});
+
+canvas.oncontextmenu = (e) => {
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const nextNodes = nodes.filter(node => Math.hypot(node.x - mx, node.y - my) > 15);
+    if (nextNodes.length !== nodes.length) {
+        saveState();
+        nodes = nextNodes;
+    }
+    draw();
+};
+
+// 拖拽逻辑
+canvas.onmousedown = (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const targetNode = nodes.find(n => Math.hypot(n.x - mx, n.y - my) < 20);
+
+    if (deleteModeCheckbox.checked) {
+        if (targetNode) {
+            saveState();
+            nodes = nodes.filter(node => node !== targetNode);
+            draggingNode = null;
+            draw();
+        }
+        return;
+    }
+
+    draggingNode = targetNode;
+    dragStartSnapshot = targetNode ? cloneNodes(nodes) : null;
+};
+
+window.onmousemove = (e) => {
+    if (draggingNode) {
+        const rect = canvas.getBoundingClientRect();
+        draggingNode.x = e.clientX - rect.left;
+        draggingNode.y = e.clientY - rect.top;
+
+        if (mirrorModeCheckbox.checked) {
+            const mirrorNode = getMirrorNode(draggingNode);
+            if (mirrorNode) {
+                mirrorNode.x = centerX - (draggingNode.x - centerX);
+                mirrorNode.y = draggingNode.y;
+            }
+        }
+
+        draw();
+    }
+};
+
+window.onmouseup = () => {
+    if (draggingNode && dragStartSnapshot) {
+        const moved = dragStartSnapshot.some((node, index) =>
+            node.x !== nodes[index].x || node.y !== nodes[index].y
+        );
+        if (moved) {
+            undoStack.push(dragStartSnapshot);
+            if (undoStack.length > 100) {
+                undoStack.shift();
+            }
+        }
+    }
+    draggingNode = null;
+    dragStartSnapshot = null;
+};
+
+window.addEventListener('keydown', (event) => {
+    const isUndo = (event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'z';
+    if (!isUndo) return;
+
+    const activeTag = document.activeElement?.tagName;
+    if (activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT') return;
+
+    event.preventDefault();
+    undo();
+});
+
+function getExportSquareBounds() {
+    const padding = Math.max(20, nodeRadius + labelFontSize * 0.6);
+    let minX = centerX - headRadius;
+    let maxX = centerX + headRadius;
+    let minY = centerY - headRadius * 1.1;
+    let maxY = centerY + headRadius;
+
+    nodes.forEach(node => {
+        minX = Math.min(minX, node.x - nodeRadius - padding * 0.25);
+        maxX = Math.max(maxX, node.x + nodeRadius + padding * 0.25);
+        minY = Math.min(minY, node.y - nodeRadius - padding * 0.25);
+        maxY = Math.max(maxY, node.y + nodeRadius + padding * 0.25);
+    });
+
+    minX -= padding;
+    maxX += padding;
+    minY -= padding;
+    maxY += padding;
+
+    const width = maxX - minX;
+    const height = maxY - minY;
+    const side = Math.max(width, height);
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+
+    let left = cx - side / 2;
+    let top = cy - side / 2;
+
+    left = Math.max(0, Math.min(left, canvasSize - side));
+    top = Math.max(0, Math.min(top, canvasSize - side));
+
+    return { left, top, side };
+}
+
+function renderExportSquareCanvas(exportScale = 4) {
+    const { left, top, side } = getExportSquareBounds();
+    const exportCanvas = document.createElement('canvas');
+    exportCanvas.width = Math.round(side * exportScale);
+    exportCanvas.height = Math.round(side * exportScale);
+    const exportCtx = exportCanvas.getContext('2d');
+
+    exportCtx.fillStyle = '#ffffff';
+    exportCtx.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
+    exportCtx.drawImage(
+        canvas,
+        left * devicePixelRatioScale,
+        top * devicePixelRatioScale,
+        side * devicePixelRatioScale,
+        side * devicePixelRatioScale,
+        0,
+        0,
+        exportCanvas.width,
+        exportCanvas.height
+    );
+
+    return exportCanvas;
+}
+
+// 导出最小外接正方形高清 PDF
+async function exportPDF() {
+    const { jsPDF } = window.jspdf;
+    const exportCanvas = renderExportSquareCanvas(4);
+    const imgData = exportCanvas.toDataURL('image/png');
+    const pdf = new jsPDF('p', 'mm', 'a4');
+    const pdfSize = Math.min(pdf.internal.pageSize.getWidth(), pdf.internal.pageSize.getHeight() - 20);
+    const x = (pdf.internal.pageSize.getWidth() - pdfSize) / 2;
+
+    pdf.addImage(imgData, 'PNG', x, 10, pdfSize, pdfSize);
+    pdf.save(`EEG_fNIRS_Layout_${new Date().getTime()}.pdf`);
+}
+
+async function exportPNG() {
+    const exportCanvas = renderExportSquareCanvas(4);
+    const imgData = exportCanvas.toDataURL('image/png');
+    const link = document.createElement('a');
+    link.href = imgData;
+    link.download = `EEG_fNIRS_Layout_${new Date().getTime()}.png`;
+    link.click();
+}
+
+function exportCED() {
+    const lines = [
+        'Number\tlabels\ttheta\tradius\tX\tY\tZ\ttype'
+    ];
+
+    nodes.forEach((node, index) => {
+        const normX = (node.x - centerX) / scale;
+        const normY = (centerY - node.y) / scale;
+        const radius = Math.sqrt(normX * normX + normY * normY);
+        const theta = Math.atan2(normX, normY) * 180 / Math.PI;
+        const z = Math.sqrt(Math.max(0, 1 - Math.min(radius * radius, 1)));
+
+        lines.push([
+            index + 1,
+            node.label,
+            theta.toFixed(4),
+            radius.toFixed(4),
+            normX.toFixed(4),
+            normY.toFixed(4),
+            z.toFixed(4),
+            node.type
+        ].join('\t'));
+    });
+
+    const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `multimodal_positions_${new Date().getTime()}.ced`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+draw();
+</script>
+</body>
+</html>
