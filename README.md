@@ -4,12 +4,15 @@ EEG, fNIRS, and EEG-fNIRS fusion training scripts for movement classification ba
 
 ## Overview
 
-This repository contains three main training pipelines and one public-dataset sanity-check script:
+This repository contains three main training pipelines plus EEGBCI public-dataset evaluation scripts:
 
 - `eeg.py`: EEG classification
 - `fnirs.py`: fNIRS classification
 - `fusion.py`: EEG-fNIRS fusion classification
-- `eegbci_quick_test.py`: EEGBCI 3-class public benchmark quick test
+- `eegbci_temporal_se.py`: EEGBCI quick test with the in-house `temporal_se` model
+- `eegbci_eegnet.py`: EEGBCI quick test with published EEGNet
+- `eegbci_deep4.py`: EEGBCI quick test with published Deep4Net
+- `eegbci_shallow.py`: EEGBCI quick test with published ShallowFBCSPNet
 
 The current scripts share the same core workflow:
 
@@ -28,7 +31,11 @@ This trial-first split avoids leakage from overlapping windows crossing dataset 
 - `eeg.py`: EEG pipeline with `tdpsd` or `bandpower` Fisher channel ranking
 - `fnirs.py`: fNIRS pipeline with trial reconstruction from annotation `11`
 - `fusion.py`: fusion pipeline using existing `Rest -> Elbow_Flexion -> Elbow_Extension` annotation triplets as trials
-- `eegbci_quick_test.py`: standalone EEGBCI imagery/execution test script with automatic download and public-data evaluation
+- `eegbci_common.py`: shared EEGBCI download, preprocessing, split, training, and evaluation logic
+- `eegbci_temporal_se.py`: standalone EEGBCI wrapper for the in-house temporal SE model
+- `eegbci_eegnet.py`: standalone EEGBCI wrapper for EEGNet
+- `eegbci_deep4.py`: standalone EEGBCI wrapper for Deep4Net
+- `eegbci_shallow.py`: standalone EEGBCI wrapper for ShallowFBCSPNet
 - `model_factory.py`: model builder for `shallow` and `temporal_se`
 - `runtime_utils.py`: shared runtime path, config, and output-directory helpers
 - `fe_u/eeg_bandpower.py`: EEG bandpower feature scoring
@@ -92,7 +99,7 @@ Additional modality-specific arguments:
   - `--model`
 - `fusion.py`
   - `--model`
-- `eegbci_quick_test.py`
+- `eegbci_*`
   - `--task_type`
   - `--subjects`
   - `--runs`
@@ -130,16 +137,28 @@ Run fusion training:
 python fusion.py --data_dir FusionEEG-fNIRS --model shallow --top_k 151
 ```
 
-Run the EEGBCI public-dataset quick test:
+Run the EEGBCI public-dataset quick test with EEGNet:
 
 ```bash
-python eegbci_quick_test.py
+python eegbci_eegnet.py
 ```
 
-Run the EEGBCI quick test on a few subjects only:
+Run the EEGBCI Deep4Net test on a few subjects only:
 
 ```bash
-python eegbci_quick_test.py --subjects 1 2 3 --model temporal_se
+python eegbci_deep4.py --subjects 1 2 3
+```
+
+Run the EEGBCI Temporal-SE test for comparison:
+
+```bash
+python eegbci_temporal_se.py --subjects 1 2 3
+```
+
+Run the EEGBCI ShallowFBCSP test without channel selection:
+
+```bash
+python eegbci_shallow.py --subjects 1 2 3 --disable_channel_selection
 ```
 
 Limit the number of files for quick checks:
@@ -176,7 +195,7 @@ The scripts now use trial-first splitting:
 - `eeg.py`: trials are reconstructed from `Stimulus/S  5`
 - `fnirs.py`: trials are reconstructed from annotation `11`
 - `fusion.py`: each `Rest -> Elbow_Flexion -> Elbow_Extension` triplet is treated as one trial
-- `eegbci_quick_test.py`: each EEGBCI annotation segment (`T0/T1/T2`) is treated as one trial before split/windowing
+- `eegbci_*`: each EEGBCI annotation segment (`T0/T1/T2`) is treated as one trial before split/windowing
 
 This means:
 
@@ -190,6 +209,8 @@ Models are defined in `model_factory.py`:
 
 - `shallow`: Braindecode `ShallowFBCSPNet`
 - `temporal_se`: lightweight temporal Conv1D network with squeeze-and-excitation
+- `eegnet`: published EEGNet for compact EEG decoding
+- `deep4`: published Deep4Net from Schirrmeister et al.
 
 ## Notes
 
@@ -209,12 +230,14 @@ Use `test.ipynb` to inspect relabeled EEG data:
 
 ## EEGBCI Quick Test
 
-Use `eegbci_quick_test.py` to validate model behavior on a public EEG dataset.
+Use the EEGBCI scripts to validate model behavior on a public EEG dataset.
 
 - defaults to the EEGBCI imagery task with runs `4/8/12`
 - uses three classes: `Rest`, `Left_Fist`, `Right_Fist`
 - checks whether EEGBCI files already exist under `data/eegbci`
 - downloads missing files automatically to `data/eegbci`
+- supports separate wrappers for `temporal_se`, `eegnet`, `deep4`, and `shallow`
+- supports `--disable_channel_selection` for a more standard public-dataset baseline
 - reports class counts, majority-class baselines, accuracy, balanced accuracy, and macro F1
 - saves logs and result files under `Logs/` and `ResEEGBCI/`
 
