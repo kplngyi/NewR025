@@ -27,8 +27,10 @@ from skorch.callbacks import EarlyStopping, LRScheduler
 from skorch.helper import predefined_split
 from runtime_utils import (
     add_common_runtime_args,
+    normalize_channel_scores,
     parse_known_args,
     prepare_runtime_dirs,
+    resolve_requested_top_k,
     resolve_path,
     resolve_project_root,
 )
@@ -290,14 +292,8 @@ TOP_K_STEP = args.top_k_step
 if TOP_K_STEP <= 0:
     raise ValueError(f"--top_k_step must be a positive integer, got {TOP_K_STEP}")
 
-requested_top_k = (
-    args.top_k if args.top_k is not None else config.get("top_k", MAX_CHANNELS)
-)
-if requested_top_k is None:
-    requested_top_k = MAX_CHANNELS
-if requested_top_k <= 0:
-    raise ValueError(f"top_k must be a positive integer, got {requested_top_k}")
-top_k = min(int(requested_top_k), MAX_CHANNELS)
+top_k = resolve_requested_top_k(args.top_k, config.get("top_k"), MAX_CHANNELS)
+requested_top_k = top_k
 if requested_top_k > MAX_CHANNELS:
     print(
         f"Requested top_k {requested_top_k} exceeds MAX_CHANNELS={MAX_CHANNELS}; "
@@ -418,7 +414,7 @@ while top_k >= MIN_TOP_K:
 
             if args.fisher_method == "bandpower":
                 fs = float(raw.info["sfreq"])
-                rank_idx, channel_scores = (
+                rank_idx, channel_scores, channel_scores_norm = (
                     fisher_score_channels_alpha_beta_from_windows_dataset(
                         windows_dataset,
                         fs=fs,
@@ -426,7 +422,7 @@ while top_k >= MIN_TOP_K:
                     )
                 )
             else:
-                rank_idx, channel_scores, _ = (
+                rank_idx, channel_scores, channel_scores_norm, _ = (
                     fisher_score_channels_from_windows_dataset_tdpsd(windows_dataset)
                 )
 
@@ -437,6 +433,10 @@ while top_k >= MIN_TOP_K:
             print(f"Channel selection fisher method: {fisher_method_tag}")
             print("Selected channel indices:", selected_channels)
             print("Selected channel scores:", channel_scores[selected_channels])
+            print(
+                "Selected normalized channel scores:",
+                channel_scores_norm[selected_channels],
+            )
 
             train_windows_dataset = create_windows_dataset_from_trials(
                 train_trials,
@@ -623,6 +623,7 @@ while top_k >= MIN_TOP_K:
                 {
                     "selected_channel_idx": selected_channels,
                     "score": channel_scores[selected_channels],
+                    "score_norm": channel_scores_norm[selected_channels],
                     "fisher_method": fisher_method_tag,
                 }
             ).to_csv(
@@ -660,7 +661,11 @@ while top_k >= MIN_TOP_K:
                 "selected_channel_scores": [
                     float(s) for s in channel_scores[selected_channels]
                 ],
+                "selected_channel_scores_norm": [
+                    float(s) for s in channel_scores_norm[selected_channels]
+                ],
                 "all_channel_scores": [float(s) for s in channel_scores],
+                "all_channel_scores_norm": [float(s) for s in channel_scores_norm],
                 "selected_channel_names": selected_channel_names,
             }
             global_results.append(result_entry)

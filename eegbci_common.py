@@ -35,8 +35,10 @@ from skorch.helper import predefined_split
 
 from runtime_utils import (
     add_common_runtime_args,
+    normalize_channel_scores,
     parse_known_args,
     prepare_runtime_dirs,
+    resolve_requested_top_k,
     resolve_path,
     resolve_project_root,
 )
@@ -397,10 +399,11 @@ def run_single_subject_experiment(
     if args.disable_channel_selection:
         selected_channels = list(range(n_channels_total))
         channel_scores = np.ones(n_channels_total, dtype=np.float32)
+        channel_scores_norm = normalize_channel_scores(channel_scores)
         print("Channel selection disabled: using all EEG channels.")
     else:
         if args.fisher_method == "bandpower":
-            rank_idx, channel_scores = (
+            rank_idx, channel_scores, channel_scores_norm = (
                 fisher_score_channels_alpha_beta_from_windows_dataset(
                     train_samples,
                     fs=train_sfreq,
@@ -408,7 +411,7 @@ def run_single_subject_experiment(
                 )
             )
         else:
-            rank_idx, channel_scores, _ = (
+            rank_idx, channel_scores, channel_scores_norm, _ = (
                 fisher_score_channels_from_windows_dataset_tdpsd(train_samples)
             )
         top_k_use = min(int(requested_top_k), n_channels_total)
@@ -419,6 +422,11 @@ def run_single_subject_experiment(
     print(f"Total channels: {n_channels_total}, selecting top_k = {top_k_use}")
     print("Selected channel indices:", selected_channels)
     print("Selected channel names:", selected_channel_names)
+    print("Selected channel scores:", channel_scores[selected_channels])
+    print(
+        "Selected normalized channel scores:",
+        channel_scores_norm[selected_channels],
+    )
 
     train_set = select_windows_with_channels(train_samples, selected_channels)
     valid_set = select_windows_with_channels(valid_samples, selected_channels)
@@ -575,7 +583,11 @@ def run_single_subject_experiment(
         "selected_channel_scores": json.dumps(
             [float(s) for s in channel_scores[selected_channels]]
         ),
+        "selected_channel_scores_norm": json.dumps(
+            [float(s) for s in channel_scores_norm[selected_channels]]
+        ),
         "all_channel_scores": json.dumps([float(s) for s in channel_scores]),
+        "all_channel_scores_norm": json.dumps([float(s) for s in channel_scores_norm]),
     }
     summary_csv = os.path.join(
         save_dir, f"{now_time}_{subject_tag}_{args.task_type}_{args.model}_summary.csv"
@@ -605,9 +617,7 @@ def run_eegbci_experiment(args):
     data_dir = resolve_path(args.data_dir, project_root)
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    requested_top_k = args.top_k if args.top_k is not None else config.get("top_k", 32)
-    if requested_top_k <= 0:
-        raise ValueError(f"top_k must be a positive integer, got {requested_top_k}")
+    requested_top_k = resolve_requested_top_k(args.top_k, config.get("top_k"), 999999)
 
     batch_size = (
         args.batch_size if args.batch_size is not None else config["batch_size"]
@@ -744,7 +754,9 @@ def run_eegbci_experiment(args):
                 "selected_channel_idx": "",
                 "selected_channel_names": "",
                 "selected_channel_scores": "",
+                "selected_channel_scores_norm": "",
                 "all_channel_scores": "",
+                "all_channel_scores_norm": "",
             }
         )
         std_row.update(
@@ -762,7 +774,9 @@ def run_eegbci_experiment(args):
                 "selected_channel_idx": "",
                 "selected_channel_names": "",
                 "selected_channel_scores": "",
+                "selected_channel_scores_norm": "",
                 "all_channel_scores": "",
+                "all_channel_scores_norm": "",
             }
         )
         aggregate_df = pd.concat(

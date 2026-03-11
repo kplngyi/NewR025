@@ -24,8 +24,10 @@ from skorch.dataset import Dataset as SkorchDataset
 from skorch.helper import predefined_split
 from runtime_utils import (
     add_common_runtime_args,
+    normalize_channel_scores,
     parse_known_args,
     prepare_runtime_dirs,
+    resolve_requested_top_k,
     resolve_path,
     resolve_project_root,
 )
@@ -279,8 +281,9 @@ def fisher_score_channels_from_windows_dataset(windows_dataset):
         Sb += nc * (muc - mu_total) ** 2
         Sw += nc * varc
     scores = Sb / (Sw + 1e-8)
-    rank_idx = np.argsort(scores)[::-1]
-    return rank_idx, scores
+    scores_norm = normalize_channel_scores(scores)
+    rank_idx = np.argsort(scores_norm)[::-1]
+    return rank_idx, scores, scores_norm
 
 
 def extract_X_y_from_sample_list(sample_list):
@@ -315,14 +318,8 @@ TOP_K_STEP = args.top_k_step
 if TOP_K_STEP <= 0:
     raise ValueError(f"--top_k_step must be a positive integer, got {TOP_K_STEP}")
 
-requested_top_k = (
-    args.top_k if args.top_k is not None else config.get("top_k", MAX_CHANNELS)
-)
-if requested_top_k is None:
-    requested_top_k = MAX_CHANNELS
-if requested_top_k <= 0:
-    raise ValueError(f"top_k must be a positive integer, got {requested_top_k}")
-top_k = min(int(requested_top_k), MAX_CHANNELS)
+top_k = resolve_requested_top_k(args.top_k, config.get("top_k"), MAX_CHANNELS)
+requested_top_k = top_k
 if requested_top_k > MAX_CHANNELS:
     print(
         f"Requested top_k {requested_top_k} exceeds MAX_CHANNELS={MAX_CHANNELS}; "
@@ -419,8 +416,8 @@ while top_k >= MIN_TOP_K:
                     continue
 
                 # ---------- 通道选择（Fisher score） ----------
-                rank_idx, channel_scores = fisher_score_channels_from_windows_dataset(
-                    windows_dataset
+                rank_idx, channel_scores, channel_scores_norm = (
+                    fisher_score_channels_from_windows_dataset(windows_dataset)
                 )
                 n_channels_total = np.array(windows_dataset[0][0]).shape[0]
                 top_k_use = min(top_k, n_channels_total)
@@ -430,6 +427,10 @@ while top_k >= MIN_TOP_K:
                 )
                 print("Selected channel indices:", selected_channels)
                 print("Selected channel scores:", channel_scores[selected_channels])
+                print(
+                    "Selected normalized channel scores:",
+                    channel_scores_norm[selected_channels],
+                )
 
                 # 保存所选通道信息（若可用）
                 try:
@@ -443,6 +444,7 @@ while top_k >= MIN_TOP_K:
                                 "idx": selected_channels,
                                 "name": selected_channel_names,
                                 "score": channel_scores[selected_channels],
+                                "score_norm": channel_scores_norm[selected_channels],
                             }
                         ).to_csv(f"{save_dir}/{key}_selected_channels.csv", index=False)
                         print("Saved selected channel info to CSV.")
@@ -639,7 +641,11 @@ while top_k >= MIN_TOP_K:
                     "selected_channel_scores": [
                         float(s) for s in channel_scores[selected_channels]
                     ],
+                    "selected_channel_scores_norm": [
+                        float(s) for s in channel_scores_norm[selected_channels]
+                    ],
                     "all_channel_scores": [float(s) for s in channel_scores],
+                    "all_channel_scores_norm": [float(s) for s in channel_scores_norm],
                     "selected_channel_names": selected_channel_names,
                 }
                 global_results.append(result_entry)

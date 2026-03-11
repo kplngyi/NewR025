@@ -1,4 +1,4 @@
-top_k: 32
+top_k: null
 window_size_samples: 200
 window_stride_samples: 100
 
