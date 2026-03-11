@@ -90,6 +90,10 @@ def build_eegbci_parser(default_model):
     parser.add_argument("--window_stride_samples", type=int, default=80)
     parser.add_argument("--l_freq", type=float, default=1.0)
     parser.add_argument("--h_freq", type=float, default=40.0)
+    parser.add_argument("--notch_freq", type=float, default=60.0)
+    parser.add_argument(
+        "--reference", type=str, default="average", choices=["average", "none"]
+    )
     return parse_known_args(add_common_runtime_args(parser))
 
 
@@ -393,7 +397,9 @@ def run_eegbci_experiment(args):
         print(f"Early stopping patience: {args.early_stopping_patience}")
         print(f"Disable channel selection: {args.disable_channel_selection}")
         print(f"Fisher方法: {args.fisher_method}")
+        print(f"Notch: {args.notch_freq} Hz")
         print(f"Bandpass: {args.l_freq}-{args.h_freq} Hz")
+        print(f"EEG reference: {args.reference}")
 
         eegbci_paths = load_eegbci_paths(subjects, runs, data_dir)
         print(f"Requested EEGBCI file count: {len(eegbci_paths)}")
@@ -403,10 +409,14 @@ def run_eegbci_experiment(args):
             raw = mne.io.read_raw_edf(path, preload=True, verbose="ERROR")
             eegbci.standardize(raw)
             raw.pick(picks="eeg")
+            if args.notch_freq is not None and args.notch_freq > 0:
+                raw.notch_filter(args.notch_freq, verbose="ERROR")
             if args.l_freq is not None or args.h_freq is not None:
                 raw.filter(
                     args.l_freq, args.h_freq, fir_design="firwin", verbose="ERROR"
                 )
+            if args.reference != "none":
+                raw.set_eeg_reference(ref_channels=args.reference, verbose="ERROR")
 
             file_name = Path(path).name
             subject_id = file_name.split("R", 1)[0].replace("S", "")
