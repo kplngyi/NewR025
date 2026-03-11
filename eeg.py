@@ -19,6 +19,8 @@ parser.add_argument('--epochs', type=int, default=300)
 parser.add_argument('--data_dir', type=str, default='PPEEG')
 parser.add_argument('--device', type=str, default='auto')
 parser.add_argument('--model', type=str, default='temporal_se', choices=['shallow', 'temporal_se'])
+parser.add_argument('--fisher_method', type=str, default='tdpsd', choices=['bandpower', 'tdpsd'])
+parser.add_argument('--bandpower_mode', type=str, default='avg', choices=['alpha', 'beta', 'avg'])
 args = parse_known_args(add_common_runtime_args(parser))
 
 # 切换到项目根目录，兼容本地脚本和 Colab 工作目录
@@ -68,6 +70,10 @@ from model_factory import build_model
 
 from skorch.callbacks import LRScheduler
 from skorch.helper import predefined_split
+from fe_u import (
+    fisher_score_channels_alpha_beta_from_windows_dataset,
+    fisher_score_channels_from_windows_dataset_tdpsd,
+)
 
 
 # 超参数
@@ -78,6 +84,7 @@ with open(resolve_path(args.config_path, project_root), "r") as f:
     config = yaml.safe_load(f)
 # Keep MNE informational chatter out of training logs.
 mne.set_log_level("WARNING")
+
 
 class Tee:
     def __init__(self, *streams):
@@ -119,46 +126,12 @@ def resolve_training_device(device_arg):
         return torch.device(requested)
     raise ValueError("Invalid --device. Use one of: auto, cpu, cuda, cuda:N")
 
-# # ------------------ 输出重定向（可选） ------------------
-# now_time = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-# sys.stdout = open(f'{now_time}_traineeg.md', 'w')
 
+def get_fisher_method_tag(method, bandpower_mode):
+    if method == 'bandpower':
+        return f'bandpower_{bandpower_mode}'
+    return method
 
-# ------------------ 通道选择（Fisher score） ------------------
-def fisher_score_channels_from_windows_dataset(windows_dataset):
-    """
-    用每个窗口每个通道的 mean(abs(x)) 作为通道特征，按 Fisher score 排序通道。
-    返回 rank_idx（按分数从大到小的通道索引数组）和 scores（每通道分数）。
-    """
-    n_windows = len(windows_dataset)
-    # 获取通道数
-    sample_X, sample_y, _ = windows_dataset[0]
-    n_channels = np.array(sample_X).shape[0]
-    F = np.zeros((n_windows, n_channels))
-    ys = np.zeros((n_windows,), dtype=int)
-    for i in range(n_windows):
-        X_i, y_i, _ = windows_dataset[i]
-        X_i = np.array(X_i)
-        # 特征：mean(abs(.)) over time
-        F[i, :] = np.mean(np.abs(X_i), axis=1)
-        ys[i] = int(y_i)
-    # 计算 Fisher score
-    classes = np.unique(ys)
-    mu_total = F.mean(axis=0)
-    Sb = np.zeros(n_channels)
-    Sw = np.zeros(n_channels)
-    for c in classes:
-        Xc = F[ys == c]
-        nc = Xc.shape[0]
-        if nc == 0:
-            continue
-        muc = Xc.mean(axis=0)
-        varc = Xc.var(axis=0)
-        Sb += nc * (muc - mu_total) ** 2
-        Sw += nc * varc
-    scores = Sb / (Sw + 1e-8)
-    rank_idx = np.argsort(scores)[::-1]
-    return rank_idx, scores
 
 # ------------------ 全局超参数（可按需调整） ------------------
 
@@ -185,6 +158,7 @@ n_epochs = args.epochs if args.epochs is not None else config["n_epochs"]
 lr = config["lr"]
 weight_decay = config["weight_decay"]
 seed = config["seed"]
+fisher_method_tag = get_fisher_method_tag(args.fisher_method, args.bandpower_mode)
 
 # ------------------ 主循环 ------------------
 while top_k >= MIN_TOP_K:
@@ -195,7 +169,7 @@ while top_k >= MIN_TOP_K:
     save_dir = runtime_dirs["output_dir"] / "ResEEG"
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(save_dir, exist_ok=True)
-    out_fname = os.path.join(log_dir, f'{now_time}_{top_k}_{n_epochs}_{lr}_traineeg.log')
+    out_fname = os.path.join(log_dir, f'{now_time}_{fisher_method_tag}_{top_k}_{n_epochs}_{lr}_traineeg.log')
     orig_stdout = sys.stdout
     f_out = open(out_fname, 'w')
     sys.stdout = Tee(orig_stdout, f_out)
@@ -211,6 +185,7 @@ while top_k >= MIN_TOP_K:
     print(f"模态最大通道数: {MAX_CHANNELS}")
     print(f"最小搜索通道数: {MIN_TOP_K}")
     print(f"通道搜索步长: {TOP_K_STEP}")
+    print(f"Fisher方法: {fisher_method_tag}")
     try:
         print("Files to process:", filesA1)
         if len(filesA1) == 0:
@@ -220,8 +195,8 @@ while top_k >= MIN_TOP_K:
 
         for filea1 in filesA1:
             resname = os.path.basename(filea1[:-4])
-            print("Processing file:", resname)
             subject_id = resname[:4]
+            print("Processing file:", resname)
             print("subject_id:", subject_id)
 
             # 读取 raw（copy 避免原始对象被修改）
@@ -234,13 +209,14 @@ while top_k >= MIN_TOP_K:
             # 你的文件中目标注释描述
             target_desc = 'Stimulus/S  5'
             annotations = raw.annotations
-            matched_onsets = [onset for onset, desc in zip(annotations.onset, annotations.description)
-                            if desc.strip() == target_desc.strip()]
+            matched_onsets = [
+                onset for onset, desc in zip(annotations.onset, annotations.description)
+                if desc.strip() == target_desc.strip()
+            ]
             print("Matched onsets for 'Stimulus/S  5':", matched_onsets)
             if len(matched_onsets) == 0:
                 print("No matched onsets found, skipping file.")
                 continue
-            t0 = matched_onsets[0]
             n_trials = len(matched_onsets)
             print(f"n_trials: {n_trials}")
 
@@ -248,10 +224,9 @@ while top_k >= MIN_TOP_K:
             onsets = []
             durations = []
             descriptions = []
-            rest_time = 1e10
             ext_time = 1e10
             for flex_time in matched_onsets:
-                onsets.append(min(ext_time+ext_dur, flex_time - rest_dur))
+                onsets.append(min(ext_time + ext_dur, flex_time - rest_dur))
                 durations.append(rest_dur)
                 descriptions.append('Rest')
 
@@ -264,7 +239,12 @@ while top_k >= MIN_TOP_K:
                 durations.append(ext_dur)
                 descriptions.append('Elbow_Extension')
 
-            new_annotations = mne.Annotations(onset=onsets, duration=durations, description=descriptions, orig_time=raw.annotations.orig_time)
+            new_annotations = mne.Annotations(
+                onset=onsets,
+                duration=durations,
+                description=descriptions,
+                orig_time=raw.annotations.orig_time,
+            )
             raw.set_annotations(raw.annotations + new_annotations)
 
             # 自定义事件 id
@@ -278,23 +258,34 @@ while top_k >= MIN_TOP_K:
             parts = [raw]
 
             windows_dataset = create_from_mne_raw(
-                    parts,
-                    trial_start_offset_samples=0,
-                    trial_stop_offset_samples=0,
-                    window_size_samples=window_size_samples,
-                    window_stride_samples=window_stride_samples,
-                    drop_last_window=False,
-                    descriptions=descriptions_braindecode,
-                    mapping=mapping,
-                )
+                parts,
+                trial_start_offset_samples=0,
+                trial_stop_offset_samples=0,
+                window_size_samples=window_size_samples,
+                window_stride_samples=window_stride_samples,
+                drop_last_window=False,
+                descriptions=descriptions_braindecode,
+                mapping=mapping,
+            )
             print("Created windows_dataset, length:", len(windows_dataset))
-            
 
-            rank_idx, channel_scores = fisher_score_channels_from_windows_dataset(windows_dataset)
+            if args.fisher_method == 'bandpower':
+                fs = float(raw.info['sfreq'])
+                rank_idx, channel_scores = fisher_score_channels_alpha_beta_from_windows_dataset(
+                    windows_dataset,
+                    fs=fs,
+                    mode=args.bandpower_mode,
+                )
+            else:
+                rank_idx, channel_scores, _ = fisher_score_channels_from_windows_dataset_tdpsd(
+                    windows_dataset
+                )
+
             n_channels_total = np.array(windows_dataset[0][0]).shape[0]
             top_k_use = min(top_k, n_channels_total)
             selected_channels = list(rank_idx[:top_k_use])
             print(f"Total channels: {n_channels_total}, selecting top_k = {top_k_use}")
+            print(f"Channel selection fisher method: {fisher_method_tag}")
             print("Selected channel indices:", selected_channels)
             print("Selected channel scores:", channel_scores[selected_channels])
 
@@ -316,17 +307,17 @@ while top_k >= MIN_TOP_K:
                 range(len(all_samples)),
                 test_size=0.3,
                 stratify=labels,
-                random_state=710
+                random_state=710,
             )
             valid_idx, test_idx = train_test_split(
                 temp_idx,
                 test_size=0.5,
                 stratify=labels[temp_idx],
-                random_state=710
+                random_state=710,
             )
             train_set = [all_samples[i] for i in train_idx]
             valid_set = [all_samples[i] for i in valid_idx]
-            test_set  = [all_samples[i] for i in test_idx]
+            test_set = [all_samples[i] for i in test_idx]
 
             def extract_X_y_from_sample_list(sample_list):
                 X_list = []
@@ -340,7 +331,7 @@ while top_k >= MIN_TOP_K:
 
             X_train, y_train = extract_X_y_from_sample_list(train_set)
             X_valid, y_valid = extract_X_y_from_sample_list(valid_set)
-            X_test,  y_test  = extract_X_y_from_sample_list(test_set)
+            X_test, y_test = extract_X_y_from_sample_list(test_set)
 
             print("Train/Valid/Test sizes:", X_train.shape[0], X_valid.shape[0], X_test.shape[0])
             print("Shapes (n_trials, n_ch_sel, n_time):", X_train.shape, X_valid.shape, X_test.shape)
@@ -412,7 +403,7 @@ while top_k >= MIN_TOP_K:
             # ---------- 保存结果 ----------
             def plot_and_save(cm, labels, title, fname):
                 disp = ConfusionMatrixDisplay(cm, display_labels=labels)
-                fig, ax = plt.subplots(figsize=(4,4))
+                fig, ax = plt.subplots(figsize=(4, 4))
                 disp.plot(ax=ax, cmap="Blues", colorbar=False, values_format='d')
                 ax.set_title(title)
                 fig.tight_layout()
@@ -420,15 +411,23 @@ while top_k >= MIN_TOP_K:
                 plt.close(fig)
                 print(f"Saved image: {fname}")
 
-            plot_and_save(cm_test, labels_for_cm, "Confusion Matrix (Test)", os.path.join(save_dir, f"{resname}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.png"))
-            pd.DataFrame(cm_test, index=labels_for_cm, columns=labels_for_cm).to_csv(os.path.join(save_dir, f"{resname}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.csv"))
+            plot_and_save(
+                cm_test,
+                labels_for_cm,
+                "Confusion Matrix (Test)",
+                os.path.join(save_dir, f"{resname}_{fisher_method_tag}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.png"),
+            )
+            pd.DataFrame(cm_test, index=labels_for_cm, columns=labels_for_cm).to_csv(
+                os.path.join(save_dir, f"{resname}_{fisher_method_tag}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.csv")
+            )
             print("CSV 已保存到", save_dir)
 
             # 记录所选通道到文件，便于审查
             pd.DataFrame({
                 "selected_channel_idx": selected_channels,
-                "score": channel_scores[selected_channels]
-            }).to_csv(os.path.join(save_dir, f"{resname}_{top_k}_selected_channels.csv"), index=False)
+                "score": channel_scores[selected_channels],
+                "fisher_method": fisher_method_tag,
+            }).to_csv(os.path.join(save_dir, f"{resname}_{fisher_method_tag}_{top_k}_selected_channels.csv"), index=False)
             print("Selected channels saved.")
 
             # ---------- 将结果记录到 global_results（用于后续比较） ----------
@@ -448,6 +447,7 @@ while top_k >= MIN_TOP_K:
                 'n_valid': int(X_valid.shape[0]),
                 'n_test': int(X_test.shape[0]),
                 'test_acc': float(test_acc),
+                'fisher_method': fisher_method_tag,
                 'selected_channel_idx': selected_channels,
                 'selected_channel_names': selected_channel_names,
             }
@@ -465,15 +465,14 @@ while top_k >= MIN_TOP_K:
                     pass
             gc.collect()
 
-        # 关闭重定向（如果需要在脚本结束后恢复输出）
-            # 恢复 stdout 并关闭文件
     finally:
         sys.stdout = orig_stdout
         f_out.close()
         print(f"Script finished. Log saved to {out_fname}")
-    ## 保存csv
+
+    # 保存summary csv
     summary_df = pd.DataFrame(global_results)
-    summary_csv = os.path.join(save_dir, f"summary_{n_epochs}_{batch_size}_{top_k}_results.csv")
+    summary_csv = os.path.join(save_dir, f"summary_{fisher_method_tag}_{n_epochs}_{batch_size}_{top_k}_results.csv")
     summary_df.to_csv(summary_csv, index=False)
     print("Saved summary CSV:", summary_csv)
     top_k = top_k - TOP_K_STEP
