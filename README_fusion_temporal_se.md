@@ -70,6 +70,18 @@ python fusion.py --model fusion_temporal_se --top_k_eeg 32 --top_k_fnirs 20
 - `--top_k_fnirs` 必须是偶数，因为 fNIRS 会按 HbO/HbR 成对保留。
 - 如果不传这两个参数，脚本会根据当前总 `top_k` 按模态规模自动分配。
 
+### 6. 通过 all.py 批量运行 fusion 专属模型
+
+```bash
+python all.py --scripts fusion --model_fusion fusion_temporal_se --top_k_eeg 32 --top_k_fnirs 20 --files_limit 1
+```
+
+如果要同时跑三个模态，但只让 fusion 使用新模型，可以这样：
+
+```bash
+python all.py --scripts eeg fnirs fusion --model_eeg temporal_se --model_fnirs temporal_se --model_fusion fusion_temporal_se --top_k_eeg 32 --top_k_fnirs 20
+```
+
 ## 对照实验建议
 
 建议按下面顺序做实验：
@@ -103,5 +115,5 @@ python fusion.py --model fusion_temporal_se --files_limit 1
 
 - `fusion_temporal_se` 要求本轮选中的通道里同时包含 EEG 和 fNIRS；如果某一轮筛选后只剩单一模态，脚本会报错并提示。
 - 当前 fusion 的通道选择不再共用单一特征，而是：EEG 用 TDPSD，fNIRS 用 pair-wise `mean/std/slope`。
-- 目前 `all.py` 仍然把同一个 `--model` 传给所有脚本，因此 `fusion_temporal_se` 更适合直接通过 `fusion.py` 单独运行。
-- 如果后续要把这个模型纳入批量实验，建议再把 `all.py` 改成支持按脚本分别指定模型。
+- `all.py` 现在已经支持按脚本分别指定模型：`--model_eeg`、`--model_fnirs`、`--model_fusion`。
+- `all.py` 也已经支持把 `--top_k_eeg`、`--top_k_fnirs` 传给 fusion 脚本。
