@@ -16,6 +16,9 @@ from runtime_utils import (
 parser = argparse.ArgumentParser()
 parser.add_argument('--batch_size', type=int, default=32)
 parser.add_argument('--epochs', type=int, default=300)
+parser.add_argument('--early_stop_patience', type=int, default=20)
+parser.add_argument('--early_stop_monitor', type=str, default='valid_loss')
+parser.add_argument('--early_stop_threshold', type=float, default=1e-4)
 parser.add_argument('--data_dir', type=str, default='PPEEG')
 parser.add_argument('--device', type=str, default='auto')
 parser.add_argument('--model', type=str, default='temporal_se', choices=['shallow', 'temporal_se'])
@@ -68,7 +71,7 @@ from braindecode import EEGClassifier
 from braindecode.util import set_random_seeds
 from model_factory import build_model
 
-from skorch.callbacks import LRScheduler
+from skorch.callbacks import EarlyStopping, LRScheduler
 from skorch.helper import predefined_split
 from fe_u import (
     fisher_score_channels_alpha_beta_from_windows_dataset,
@@ -155,6 +158,9 @@ window_size_samples = config["window_size_samples"]
 window_stride_samples = config["window_stride_samples"]
 batch_size = args.batch_size if args.batch_size is not None else config["batch_size"]
 n_epochs = args.epochs if args.epochs is not None else config["n_epochs"]
+early_stop_patience = max(1, args.early_stop_patience)
+early_stop_monitor = args.early_stop_monitor
+early_stop_threshold = args.early_stop_threshold
 lr = config["lr"]
 weight_decay = config["weight_decay"]
 seed = config["seed"]
@@ -182,6 +188,9 @@ while top_k >= MIN_TOP_K:
     print(f"权重衰减: {weight_decay}")
     print(f"批大小: {batch_size}")
     print(f"训练轮数: {n_epochs}")
+    print(f"早停监控指标: {early_stop_monitor}")
+    print(f"早停耐心轮数: {early_stop_patience}")
+    print(f"早停阈值: {early_stop_threshold}")
     print(f"模态最大通道数: {MAX_CHANNELS}")
     print(f"最小搜索通道数: {MIN_TOP_K}")
     print(f"通道搜索步长: {TOP_K_STEP}")
@@ -382,6 +391,17 @@ while top_k >= MIN_TOP_K:
                 callbacks=[
                     "accuracy",
                     ("lr_scheduler", LRScheduler("CosineAnnealingLR", T_max=max(1, n_epochs - 1))),
+                    (
+                        "early_stopping",
+                        EarlyStopping(
+                            monitor=early_stop_monitor,
+                            patience=early_stop_patience,
+                            threshold=early_stop_threshold,
+                            threshold_mode="rel",
+                            lower_is_better=(early_stop_monitor == "valid_loss"),
+                            load_best=True,
+                        ),
+                    ),
                 ],
                 device=str(train_device),
                 classes=classes,
@@ -391,6 +411,21 @@ while top_k >= MIN_TOP_K:
             print("Start training...")
             clf.fit(X_train, y=y_train)
             print("Training finished.")
+            actual_epochs = len(clf.history)
+            early_stopping_cb = None
+            callbacks_runtime = getattr(clf, "callbacks_", None)
+            if isinstance(callbacks_runtime, dict):
+                early_stopping_cb = callbacks_runtime.get("early_stopping")
+            elif callbacks_runtime is not None:
+                for callback_name, callback_obj in callbacks_runtime:
+                    if callback_name == "early_stopping":
+                        early_stopping_cb = callback_obj
+                        break
+            best_valid_score = getattr(early_stopping_cb, "best_score_", None)
+            best_epoch = getattr(early_stopping_cb, "best_epoch_", None)
+            print(f"Actual trained epochs: {actual_epochs}")
+            print(f"Best {early_stop_monitor}: {best_valid_score}")
+            print(f"Best epoch: {best_epoch}")
 
             # ------------------ 评估 ------------------
             y_pred_test = clf.predict(X_test)
@@ -446,6 +481,11 @@ while top_k >= MIN_TOP_K:
                 'n_train': int(X_train.shape[0]),
                 'n_valid': int(X_valid.shape[0]),
                 'n_test': int(X_test.shape[0]),
+                'trained_epochs': int(actual_epochs),
+                'early_stop_monitor': early_stop_monitor,
+                'early_stop_patience': int(early_stop_patience),
+                'best_valid_score': None if best_valid_score is None else float(best_valid_score),
+                'best_epoch': None if best_epoch is None else int(best_epoch),
                 'test_acc': float(test_acc),
                 'fisher_method': fisher_method_tag,
                 'selected_channel_idx': selected_channels,
