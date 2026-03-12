@@ -18,7 +18,7 @@ parser.add_argument('--batch_size', type=int, default=32)
 parser.add_argument('--epochs', type=int, default=300)
 parser.add_argument('--early_stop_patience', type=int, default=20)
 parser.add_argument('--early_stop_monitor', type=str, default='valid_loss')
-parser.add_argument('--early_stop_threshold', type=float, default=1e-4)
+parser.add_argument('--early_stop_threshold', type=float, default=1e-3)
 parser.add_argument('--data_dir', type=str, default='PPEEG')
 parser.add_argument('--device', type=str, default='auto')
 parser.add_argument('--model', type=str, default='temporal_se', choices=['shallow', 'temporal_se'])
@@ -190,7 +190,7 @@ while top_k >= MIN_TOP_K:
     print(f"训练轮数: {n_epochs}")
     print(f"早停监控指标: {early_stop_monitor}")
     print(f"早停耐心轮数: {early_stop_patience}")
-    print(f"早停阈值: {early_stop_threshold}")
+    print(f"早停最小改进幅度: {early_stop_threshold}")
     print(f"模态最大通道数: {MAX_CHANNELS}")
     print(f"最小搜索通道数: {MIN_TOP_K}")
     print(f"通道搜索步长: {TOP_K_STEP}")
@@ -397,7 +397,7 @@ while top_k >= MIN_TOP_K:
                             monitor=early_stop_monitor,
                             patience=early_stop_patience,
                             threshold=early_stop_threshold,
-                            threshold_mode="rel",
+                            threshold_mode="abs",
                             lower_is_better=(early_stop_monitor == "valid_loss"),
                             load_best=True,
                         ),
