@@ -2,6 +2,15 @@ import numpy as np
 from scipy.signal import welch
 
 
+def normalize_score_vector(scores):
+    scores = np.asarray(scores, dtype=float)
+    score_min = scores.min()
+    score_max = scores.max()
+    if score_max - score_min < 1e-12:
+        return np.zeros_like(scores)
+    return (scores - score_min) / (score_max - score_min)
+
+
 def bandpower_welch(x, fs, fmin, fmax, nperseg=None, log_power=True, eps=1e-10):
     """
     Estimate 1D signal bandpower with Welch PSD and integrate within [fmin, fmax).
@@ -28,7 +37,9 @@ def bandpower_welch(x, fs, fmin, fmax, nperseg=None, log_power=True, eps=1e-10):
     return float(bp)
 
 
-def fisher_score_channels_alpha_beta_from_windows_dataset(windows_dataset, fs, mode="avg"):
+def fisher_score_channels_alpha_beta_from_windows_dataset(
+    windows_dataset, fs, mode="avg"
+):
     """
     Rank channels by Fisher score using EEG alpha/beta bandpower features.
 
@@ -57,7 +68,9 @@ def fisher_score_channels_alpha_beta_from_windows_dataset(windows_dataset, fs, m
         X_i = np.asarray(X_i, dtype=float)
 
         if X_i.ndim != 2:
-            raise ValueError(f"Window {i}: expected X_i shape (n_ch, n_time), got {X_i.shape}")
+            raise ValueError(
+                f"Window {i}: expected X_i shape (n_ch, n_time), got {X_i.shape}"
+            )
         if X_i.shape[0] != n_channels:
             raise ValueError(
                 f"Inconsistent channel count at window {i}: {X_i.shape[0]} vs {n_channels}"
@@ -99,6 +112,7 @@ def fisher_score_channels_alpha_beta_from_windows_dataset(windows_dataset, fs, m
         Sb += nc * (muc - mu_total) ** 2
         Sw += nc * varc
 
-    scores = Sb / (Sw + 1e-8)
+    # 通道排序前先对 Fisher 分数做归一化，便于不同实验之间比较分数。
+    scores = normalize_score_vector(Sb / (Sw + 1e-8))
     rank_idx = np.argsort(scores)[::-1]
     return rank_idx, scores

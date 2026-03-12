@@ -190,6 +190,12 @@ def fisher_score_channels_from_windows_dataset(windows_dataset):
         Sb += nc * (muc - mu_total) ** 2
         Sw += nc * varc
     scores = Sb / (Sw + 1e-8)
+    score_min = scores.min()
+    score_max = scores.max()
+    if score_max - score_min < 1e-12:
+        scores = np.zeros_like(scores)
+    else:
+        scores = (scores - score_min) / (score_max - score_min)
     rank_idx = np.argsort(scores)[::-1]
     return rank_idx, scores
 

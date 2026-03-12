@@ -127,6 +127,11 @@ early_stop_threshold = (
 lr = config["lr"]
 weight_decay = config["weight_decay"]
 seed = config["seed"]
+PAIR_FEATURE_DESC = "mean-std-slope"
+PAIR_WEIGHT_HBO = 0.7
+PAIR_WEIGHT_HBR = 0.3
+PAIR_NORM_METHOD = "minmax"
+PAIR_RESULT_LABEL = f"fnirs_pair_norm-{PAIR_NORM_METHOD}_feat-{PAIR_FEATURE_DESC}_hbo{PAIR_WEIGHT_HBO}-hbr{PAIR_WEIGHT_HBR}"
 
 save_dir = runtime_dirs["output_dir"] / "ResfNIRS_pair"
 os.makedirs(save_dir, exist_ok=True)
@@ -155,6 +160,15 @@ def zscore_vector(values):
     if std < 1e-12:
         return np.zeros_like(values)
     return (values - values.mean()) / std
+
+
+def normalize_score_vector(values):
+    values = np.asarray(values, dtype=float)
+    value_min = values.min()
+    value_max = values.max()
+    if value_max - value_min < 1e-12:
+        return np.zeros_like(values)
+    return (values - value_min) / (value_max - value_min)
 
 
 def split_fnirs_channel_pairs(ch_names):
@@ -277,7 +291,7 @@ def fisher_score_channel_pairs_from_windows_dataset(windows_dataset, ch_names):
         + 0.2 * zscore_vector(hbr_std_score)
         + 0.3 * zscore_vector(hbr_slope_score)
     )
-    pair_scores = 0.7 * hbo_score + 0.3 * hbr_score
+    pair_scores = normalize_score_vector(0.7 * hbo_score + 0.3 * hbr_score)
     rank_idx = np.argsort(pair_scores)[::-1]
 
     pair_detail_rows = []
@@ -491,7 +505,8 @@ while top_k >= MIN_TOP_K:
 
                 pair_detail_df = pd.DataFrame(pair_detail_rows)
                 pair_detail_df.to_csv(
-                    f"{save_dir}/{resname}_pair_scores.csv", index=False
+                    f"{save_dir}/{resname}_{PAIR_RESULT_LABEL}_pair_scores.csv",
+                    index=False,
                 )
 
                 selected_pair_export_rows = []
@@ -506,7 +521,8 @@ while top_k >= MIN_TOP_K:
                     )
                     selected_pair_export_rows.append(pair_row)
                 pd.DataFrame(selected_pair_export_rows).to_csv(
-                    f"{save_dir}/{resname}_selected_pairs.csv", index=False
+                    f"{save_dir}/{resname}_{PAIR_RESULT_LABEL}_selected_pairs.csv",
+                    index=False,
                 )
                 print("Saved selected pair info to CSV.")
 
@@ -666,6 +682,10 @@ while top_k >= MIN_TOP_K:
                     pair_infos[i]["pair_name"] for i in selected_pair_indices
                 ]
                 selected_channel_names = [ch_names[i] for i in selected_channels]
+                pair_score_mean = float(pair_scores.mean())
+                pair_score_std = float(pair_scores.std())
+                pair_score_min = float(pair_scores.min())
+                pair_score_max = float(pair_scores.max())
 
                 result_entry = {
                     "subject": subject_id,
@@ -688,9 +708,15 @@ while top_k >= MIN_TOP_K:
                     "selected_pair_names": selected_pair_names,
                     "selected_channel_idx": selected_channels,
                     "selected_channel_names": selected_channel_names,
-                    "selected_pair_scores": [
+                    "selected_pair_scores_norm": [
                         float(pair_scores[i]) for i in selected_pair_indices
                     ],
+                    "pair_score_mean": pair_score_mean,
+                    "pair_score_std": pair_score_std,
+                    "pair_score_min": pair_score_min,
+                    "pair_score_max": pair_score_max,
+                    "fisher_norm_method": PAIR_NORM_METHOD,
+                    "fisher_feature_desc": PAIR_FEATURE_DESC,
                 }
                 global_results.append(result_entry)
 
@@ -726,7 +752,8 @@ while top_k >= MIN_TOP_K:
 
     summary_df = pd.DataFrame(global_results)
     summary_csv = os.path.join(
-        save_dir, f"summary_pair_{n_epochs}_{batch_size}_{top_k}_results.csv"
+        save_dir,
+        f"summary_{PAIR_RESULT_LABEL}_ep{n_epochs}_bs{batch_size}_topk{top_k}_step{TOP_K_STEP}_{now_time}.csv",
     )
     summary_df.to_csv(summary_csv, index=False)
     print("Saved summary CSV:", summary_csv)

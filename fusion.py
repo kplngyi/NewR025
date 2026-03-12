@@ -21,7 +21,10 @@ parser.add_argument("--early_stop_monitor", type=str, default=None)
 parser.add_argument("--early_stop_threshold", type=float, default=None)
 parser.add_argument("--data_dir", type=str, default="FusionEEG-fNIRS")
 parser.add_argument(
-    "--model", type=str, default="shallow", choices=["shallow", "temporal_se"]
+    "--model",
+    type=str,
+    default="shallow",
+    choices=["shallow", "temporal_se", "fusion_temporal_se"],
 )
 args = parse_known_args(add_common_runtime_args(parser))
 
@@ -161,6 +164,12 @@ def fisher_score_channels_from_windows_dataset(windows_dataset):
         Sb += nc * (muc - mu_total) ** 2
         Sw += nc * varc
     scores = Sb / (Sw + 1e-8)
+    score_min = scores.min()
+    score_max = scores.max()
+    if score_max - score_min < 1e-12:
+        scores = np.zeros_like(scores)
+    else:
+        scores = (scores - score_min) / (score_max - score_min)
     rank_idx = np.argsort(scores)[::-1]
     return rank_idx, scores
 
@@ -184,6 +193,20 @@ def plot_and_save(cm, labels, title, fname):
     fig.tight_layout()
     fig.savefig(fname, dpi=300)
     plt.close(fig)
+
+
+def split_selected_channels_by_modality(raw, selected_channels):
+    # fusion_temporal_se 需要显式区分 EEG 与 fNIRS，因此这里按通道
+    # 类型重排索引，保证后续输入模型时始终是 EEG 在前、fNIRS 在后。
+    channel_types = raw.get_channel_types()
+    eeg_channels = []
+    fnirs_channels = []
+    for ch_idx in selected_channels:
+        if channel_types[ch_idx] == "eeg":
+            eeg_channels.append(ch_idx)
+        else:
+            fnirs_channels.append(ch_idx)
+    return eeg_channels + fnirs_channels, len(eeg_channels), len(fnirs_channels)
 
 
 # --------------- 可配置参数 ---------------
@@ -262,6 +285,8 @@ while top_k >= MIN_TOP_K:
         # matched_keys = [matched_keys[i] for i in range(2)]
         # matched_keys = matched_keys[-2:]
         for key in matched_keys:
+            model = None
+            clf = None
             try:
                 fusion_path = os.path.join(fusion_dir, key + "_eeg_fnirs_raw.fif")
                 print("\n🔄 Processing:", fusion_path)
@@ -306,11 +331,30 @@ while top_k >= MIN_TOP_K:
                 n_channels_total = np.array(windows_dataset[0][0]).shape[0]
                 top_k_use = min(top_k, n_channels_total)
                 selected_channels = list(rank_idx[:top_k_use])
+                ordered_selected_channels = selected_channels
+                eeg_channels_selected = None
+                fnirs_channels_selected = None
+                if args.model == "fusion_temporal_se":
+                    (
+                        ordered_selected_channels,
+                        eeg_channels_selected,
+                        fnirs_channels_selected,
+                    ) = split_selected_channels_by_modality(raw, selected_channels)
+                    if eeg_channels_selected == 0 or fnirs_channels_selected == 0:
+                        raise ValueError(
+                            "fusion_temporal_se 需要选中的通道同时包含 EEG 和 fNIRS。"
+                        )
                 print(
                     f"Total channels: {n_channels_total}, selecting top_k = {top_k_use}"
                 )
                 print("Selected channel indices:", selected_channels)
                 print("Selected channel scores:", channel_scores[selected_channels])
+                if args.model == "fusion_temporal_se":
+                    print(
+                        "Ordered selected channel indices:", ordered_selected_channels
+                    )
+                    print("Selected EEG channel count:", eeg_channels_selected)
+                    print("Selected fNIRS channel count:", fnirs_channels_selected)
 
                 # 保存所选通道信息（若可用）
                 try:
@@ -319,11 +363,16 @@ while top_k >= MIN_TOP_K:
                         selected_channel_names = [
                             ch_names[i] for i in selected_channels
                         ]
+                        ordered_selected_channel_names = [
+                            ch_names[i] for i in ordered_selected_channels
+                        ]
                         pd.DataFrame(
                             {
                                 "idx": selected_channels,
                                 "name": selected_channel_names,
                                 "score": channel_scores[selected_channels],
+                                "ordered_idx": ordered_selected_channels,
+                                "ordered_name": ordered_selected_channel_names,
                             }
                         ).to_csv(f"{save_dir}/{key}_selected_channels.csv", index=False)
                         print("Saved selected channel info to CSV.")
@@ -335,7 +384,7 @@ while top_k >= MIN_TOP_K:
                 for i in range(len(windows_dataset)):
                     X_i, y_i, meta_i = windows_dataset[i]
                     X_i = np.array(X_i)  # (n_ch, n_time)
-                    X_i_sel = X_i[selected_channels, :]
+                    X_i_sel = X_i[ordered_selected_channels, :]
                     selected_windows.append((X_i_sel, int(y_i), meta_i))
 
                 # ---------- 划分 train/valid/test（70/15/15） ----------
@@ -399,6 +448,8 @@ while top_k >= MIN_TOP_K:
                     n_channels=n_channels,
                     n_classes=n_classes,
                     n_times=input_window_samples,
+                    eeg_channels=eeg_channels_selected,
+                    fnirs_channels=fnirs_channels_selected,
                 )
                 print(f"Model: {args.model}")
                 print(model)
@@ -496,7 +547,7 @@ while top_k >= MIN_TOP_K:
                 try:
                     ch_names = raw.info.get("ch_names", None)
                     selected_channel_names = (
-                        [ch_names[i] for i in selected_channels]
+                        [ch_names[i] for i in ordered_selected_channels]
                         if ch_names is not None
                         else []
                     )
@@ -509,6 +560,12 @@ while top_k >= MIN_TOP_K:
                     "top_k": int(top_k_use),
                     "n_channels_total": int(n_channels_total),
                     "n_channels_selected": int(len(selected_channels)),
+                    "n_eeg_channels_selected": None
+                    if eeg_channels_selected is None
+                    else int(eeg_channels_selected),
+                    "n_fnirs_channels_selected": None
+                    if fnirs_channels_selected is None
+                    else int(fnirs_channels_selected),
                     "n_train": int(X_train.shape[0]),
                     "n_valid": int(X_valid.shape[0]),
                     "n_test": int(X_test.shape[0]),
@@ -520,7 +577,7 @@ while top_k >= MIN_TOP_K:
                     else float(best_valid_score),
                     "best_epoch": None if best_epoch is None else int(best_epoch),
                     "test_acc": float(test_acc),
-                    "selected_channel_idx": selected_channels,
+                    "selected_channel_idx": ordered_selected_channels,
                     "selected_channel_names": selected_channel_names,
                 }
                 global_results.append(result_entry)
@@ -528,7 +585,12 @@ while top_k >= MIN_TOP_K:
                 del clf, model
                 del X_train, y_train, X_valid, y_valid, X_test, y_test
                 del train_set, valid_set, test_set, selected_windows, windows_dataset
-                del rank_idx, channel_scores, selected_channels
+                del (
+                    rank_idx,
+                    channel_scores,
+                    selected_channels,
+                    ordered_selected_channels,
+                )
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                     try:

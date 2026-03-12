@@ -1,6 +1,15 @@
 import numpy as np
 
 
+def normalize_score_vector(scores):
+    scores = np.asarray(scores, dtype=float)
+    score_min = scores.min()
+    score_max = scores.max()
+    if score_max - score_min < 1e-12:
+        return np.zeros_like(scores)
+    return (scores - score_min) / (score_max - score_min)
+
+
 def tdpsd_features_1d(x, eps=1e-10):
     """
     单通道 TDPSD 特征:
@@ -11,21 +20,26 @@ def tdpsd_features_1d(x, eps=1e-10):
     x = np.asarray(x, dtype=float).reshape(-1)
 
     if x.size < 3:
-        raise ValueError("Signal length must be at least 3 for TDPSD feature extraction.")
+        raise ValueError(
+            "Signal length must be at least 3 for TDPSD feature extraction."
+        )
 
     var_x = np.var(x)
 
     d1 = np.diff(x)
     d2 = np.diff(d1)
 
-    e1 = np.mean(d1 ** 2)
-    e2 = np.mean(d2 ** 2)
+    e1 = np.mean(d1**2)
+    e2 = np.mean(d2**2)
 
-    return np.array([
-        np.log(var_x + eps),
-        np.log(e1 + eps),
-        np.log(e2 + eps),
-    ], dtype=float)
+    return np.array(
+        [
+            np.log(var_x + eps),
+            np.log(e1 + eps),
+            np.log(e2 + eps),
+        ],
+        dtype=float,
+    )
 
 
 def fisher_score_2d(F, y):
@@ -92,7 +106,9 @@ def fisher_score_channels_from_windows_dataset_tdpsd(windows_dataset):
         X_i = np.asarray(X_i, dtype=float)
 
         if X_i.ndim != 2:
-            raise ValueError(f"Window {i}: expected X_i shape (n_ch, n_time), got {X_i.shape}")
+            raise ValueError(
+                f"Window {i}: expected X_i shape (n_ch, n_time), got {X_i.shape}"
+            )
         if X_i.shape[0] != n_channels:
             raise ValueError(
                 f"Inconsistent channel count at window {i}: {X_i.shape[0]} vs {n_channels}"
@@ -110,8 +126,13 @@ def fisher_score_channels_from_windows_dataset_tdpsd(windows_dataset):
         F_k = F_all[:, :, k]
         sub_scores[:, k] = fisher_score_2d(F_k, ys)
 
-    # 每个通道把 3 个子特征分数取sum
-    scores = sub_scores.sum(axis=1)
+    # 先把每个子特征的 Fisher 分数归一化，再融合成通道总分，避免某一类
+    # 子特征数值尺度过大而主导通道排序。
+    sub_scores_norm = np.zeros_like(sub_scores)
+    for k in range(n_tdpsd):
+        sub_scores_norm[:, k] = normalize_score_vector(sub_scores[:, k])
+
+    scores = normalize_score_vector(sub_scores_norm.sum(axis=1))
     rank_idx = np.argsort(scores)[::-1]
 
-    return rank_idx, scores, sub_scores
+    return rank_idx, scores, sub_scores_norm
