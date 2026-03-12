@@ -73,6 +73,10 @@ from sklearn.model_selection import train_test_split
 from braindecode.datasets import create_from_mne_raw
 from braindecode import EEGClassifier
 from braindecode.util import set_random_seeds
+from fnirs_pair_fisher import (
+    compute_pair_fisher_scores,
+    expand_pair_selection_to_channels,
+)
 from model_factory import build_model
 
 from skorch.callbacks import EarlyStopping, LRScheduler
@@ -151,53 +155,56 @@ seed = config["seed"]
 save_dir = runtime_dirs["output_dir"] / "ResfNIRS"
 os.makedirs(save_dir, exist_ok=True)
 
+PAIR_FEATURE_DESC = "mean-std-slope"
+PAIR_WEIGHT_HBO = 0.7
+PAIR_WEIGHT_HBR = 0.3
+
 
 # ------------------ 辅助函数 ------------------
-def fisher_score_channels_from_windows_dataset(windows_dataset):
+def select_fnirs_channels_by_pairs(raw, windows_dataset, total_top_k):
     """
-    计算 Fisher score（每窗口每通道 mean(abs(X)) 作为通道特征）
-    windows_dataset[i] -> (X, y, meta) 其中 X shape = (n_ch, n_time)
-    返回 rank_idx（按分数从大到小的通道索引）和 scores（每通道分数）
+    使用 HbO/HbR 成对的 mean/std/slope 特征计算 Fisher 分数。
+
+    注意：这里仍然返回“通道级”索引，方便后续训练流程尽量少改；
+    但排序与选择的基本单位已经改成位置对，再展开成对应的 HbO/HbR 两个通道。
     """
-    n_windows = len(windows_dataset)
-    if n_windows == 0:
-        raise ValueError("windows_dataset is empty")
-    sample_X, sample_y, _ = windows_dataset[0]
-    sample_X = np.array(sample_X)
-    n_channels = sample_X.shape[0]
-    F = np.zeros((n_windows, n_channels), dtype=float)
-    ys = np.zeros((n_windows,), dtype=int)
-    for i in range(n_windows):
-        X_i, y_i, _ = windows_dataset[i]
-        X_i = np.array(X_i)
-        if X_i.shape[0] != n_channels:
-            raise ValueError(
-                f"Inconsistent channel count at window {i}: {X_i.shape[0]} vs {n_channels}"
-            )
-        F[i, :] = np.mean(np.abs(X_i), axis=1)
-        ys[i] = int(y_i)
-    classes = np.unique(ys)
-    mu_total = F.mean(axis=0)
-    Sb = np.zeros(n_channels, dtype=float)
-    Sw = np.zeros(n_channels, dtype=float)
-    for c in classes:
-        Xc = F[ys == c]
-        nc = Xc.shape[0]
-        if nc == 0:
-            continue
-        muc = Xc.mean(axis=0)
-        varc = Xc.var(axis=0)
-        Sb += nc * (muc - mu_total) ** 2
-        Sw += nc * varc
-    scores = Sb / (Sw + 1e-8)
-    score_min = scores.min()
-    score_max = scores.max()
-    if score_max - score_min < 1e-12:
-        scores = np.zeros_like(scores)
-    else:
-        scores = (scores - score_min) / (score_max - score_min)
-    rank_idx = np.argsort(scores)[::-1]
-    return rank_idx, scores
+    ch_names = raw.info.get("ch_names", None)
+    if ch_names is None:
+        raise ValueError("raw.info 中没有 ch_names，无法执行 HbO/HbR 成对筛选。")
+
+    pair_rank_idx, pair_scores, pair_infos, pair_detail_rows = (
+        compute_pair_fisher_scores(
+            windows_dataset,
+            ch_names,
+            hbo_weight=PAIR_WEIGHT_HBO,
+        )
+    )
+    top_k_use = min(total_top_k, np.asarray(windows_dataset[0][0]).shape[0])
+    pair_keep = max(1, top_k_use // 2)
+    selected_pair_indices = list(pair_rank_idx[:pair_keep])
+    selected_channels, _ = expand_pair_selection_to_channels(
+        selected_pair_indices,
+        pair_infos,
+    )
+    selected_channels = selected_channels[:top_k_use]
+
+    channel_scores = np.zeros(len(ch_names), dtype=float)
+    for pair_idx, pair_info in enumerate(pair_infos):
+        pair_score = float(pair_scores[pair_idx])
+        channel_scores[pair_info["hbo_idx"]] = pair_score
+        channel_scores[pair_info["hbr_idx"]] = pair_score
+
+    selection_info = {
+        "selected_pair_indices": selected_pair_indices,
+        "pair_scores": pair_scores,
+        "pair_infos": pair_infos,
+        "pair_detail_rows": pair_detail_rows,
+        "pair_keep": pair_keep,
+        "feature_desc": PAIR_FEATURE_DESC,
+        "hbo_weight": PAIR_WEIGHT_HBO,
+        "hbr_weight": PAIR_WEIGHT_HBR,
+    }
+    return selected_channels, channel_scores, selection_info
 
 
 def extract_X_y_from_sample_list(sample_list):
@@ -351,13 +358,15 @@ while top_k >= MIN_TOP_K:
                     print("No windows created. Skipping file.")
                     continue
 
-                # ------------------ 通道选择（Fisher score） ------------------
-                rank_idx, channel_scores = fisher_score_channels_from_windows_dataset(
-                    windows_dataset
-                )
+                # ------------------ 通道选择（HbO/HbR 成对 Fisher score） ------------------
                 n_channels_total = np.array(windows_dataset[0][0]).shape[0]
                 top_k_use = min(top_k, n_channels_total)
-                selected_channels = list(rank_idx[:top_k_use])
+                (
+                    selected_channels,
+                    channel_scores,
+                    selection_info,
+                ) = select_fnirs_channels_by_pairs(raw, windows_dataset, top_k_use)
+                top_k_use = len(selected_channels)
                 selected_channel_scores_norm_global = [
                     float(channel_scores[idx]) for idx in selected_channels
                 ]
@@ -368,6 +377,21 @@ while top_k >= MIN_TOP_K:
                 print(
                     "Selected channel scores (norm_global):",
                     selected_channel_scores_norm_global,
+                )
+                print("fNIRS Fisher feature:", selection_info["feature_desc"])
+                print("Selected pair count:", selection_info["pair_keep"])
+
+                pair_detail_df = pd.DataFrame(selection_info["pair_detail_rows"])
+                pair_detail_df.to_csv(
+                    f"{save_dir}/{resname}_pair_scores.csv", index=False
+                )
+                selected_pair_export_rows = []
+                for pair_idx in selection_info["selected_pair_indices"]:
+                    pair_row = pair_detail_df.iloc[pair_idx].to_dict()
+                    pair_row["selected"] = True
+                    selected_pair_export_rows.append(pair_row)
+                pd.DataFrame(selected_pair_export_rows).to_csv(
+                    f"{save_dir}/{resname}_selected_pairs.csv", index=False
                 )
 
                 # 保存所选通道名字（若 raw.info 有通道名）
@@ -579,6 +603,8 @@ while top_k >= MIN_TOP_K:
                     else float(best_valid_score),
                     "best_epoch": None if best_epoch is None else int(best_epoch),
                     "test_acc": float(test_acc),
+                    "fisher_feature_desc": selection_info["feature_desc"],
+                    "selected_pair_idx": selection_info["selected_pair_indices"],
                     "selected_channel_idx": selected_channels,
                     "selected_channel_scores_norm_global": selected_channel_scores_norm_global,
                     "score_norm_scope": "global_all_channels",
@@ -589,7 +615,7 @@ while top_k >= MIN_TOP_K:
                 del clf, model
                 del X_train, y_train, X_valid, y_valid, X_test, y_test
                 del train_set, valid_set, test_set, selected_windows, windows_dataset
-                del rank_idx, channel_scores, selected_channels
+                del channel_scores, selected_channels, selection_info
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                     try:
