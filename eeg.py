@@ -550,6 +550,7 @@ while top_k >= MIN_TOP_K:
                 {
                     "selected_channel_idx": selected_channels,
                     "score": channel_scores[selected_channels],
+                    "score_norm_global": channel_scores[selected_channels],
                     "fisher_method": fisher_method_tag,
                 }
             ).to_csv(
@@ -591,9 +592,10 @@ while top_k >= MIN_TOP_K:
                 "test_acc": float(test_acc),
                 "fisher_method": fisher_method_tag,
                 "selected_channel_idx": selected_channels,
-                "selected_channel_scores": [
+                "selected_channel_scores_norm_global": [
                     float(s) for s in channel_scores[selected_channels]
                 ],
+                "score_norm_scope": "global_all_channels",
                 "all_channel_scores": [float(s) for s in channel_scores],
                 "selected_channel_names": selected_channel_names,
             }

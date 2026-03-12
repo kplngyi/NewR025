@@ -486,8 +486,14 @@ while top_k >= MIN_TOP_K:
                 print(
                     f"Total channels: {n_channels_total}, selecting top_k = {top_k_use}"
                 )
+                selected_channel_scores_norm_global = [
+                    float(channel_scores[idx]) for idx in selected_channels
+                ]
                 print("Selected channel indices:", selected_channels)
-                print("Selected channel scores:", channel_scores[selected_channels])
+                print(
+                    "Selected channel scores (norm_global):",
+                    selected_channel_scores_norm_global,
+                )
                 print("EEG Fisher method:", selection_info["eeg_method"])
                 print("fNIRS Fisher method:", selection_info["fnirs_method"])
                 print("Selected EEG channel count:", selection_info["eeg_keep"])
@@ -514,6 +520,7 @@ while top_k >= MIN_TOP_K:
                                 "idx": selected_channels,
                                 "name": selected_channel_names,
                                 "score": channel_scores[selected_channels],
+                                "score_norm_global": selected_channel_scores_norm_global,
                                 "modality": [
                                     "EEG"
                                     if idx in selection_info["eeg_selected_channels"]
@@ -734,6 +741,10 @@ while top_k >= MIN_TOP_K:
                         "fnirs_selected_pair_idx"
                     ],
                     "selected_channel_idx": ordered_selected_channels,
+                    "selected_channel_scores_norm_global": [
+                        float(channel_scores[idx]) for idx in ordered_selected_channels
+                    ],
+                    "score_norm_scope": "global_all_channels",
                     "selected_channel_names": selected_channel_names,
                 }
                 global_results.append(result_entry)

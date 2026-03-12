@@ -108,8 +108,11 @@ python fusion.py --model fusion_temporal_se --files_limit 1
   - `ordered_idx`
   - `ordered_name`
   - `modality`
+  - `score_norm_global`
 
-这两个字段表示实际送入双分支模型时使用的通道顺序。
+- `ordered_idx` / `ordered_name` 表示实际送入双分支模型时使用的通道顺序。
+- `selected_channel_scores_norm_global`（summary 中）和 `score_norm_global`（CSV 中）表示：
+  先按全通道 Fisher 分数完成归一化，再取本次入选通道对应的分数，便于不同 `top_k` 和不同实验之间比较。
 
 ## 注意事项
 

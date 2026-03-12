@@ -358,11 +358,17 @@ while top_k >= MIN_TOP_K:
                 n_channels_total = np.array(windows_dataset[0][0]).shape[0]
                 top_k_use = min(top_k, n_channels_total)
                 selected_channels = list(rank_idx[:top_k_use])
+                selected_channel_scores_norm_global = [
+                    float(channel_scores[idx]) for idx in selected_channels
+                ]
                 print(
                     f"Total channels: {n_channels_total}, selecting top_k = {top_k_use}"
                 )
                 print("Selected channel indices:", selected_channels)
-                print("Selected channel scores:", channel_scores[selected_channels])
+                print(
+                    "Selected channel scores (norm_global):",
+                    selected_channel_scores_norm_global,
+                )
 
                 # 保存所选通道名字（若 raw.info 有通道名）
                 try:
@@ -376,6 +382,7 @@ while top_k >= MIN_TOP_K:
                                 "idx": selected_channels,
                                 "name": selected_channel_names,
                                 "score": channel_scores[selected_channels],
+                                "score_norm_global": selected_channel_scores_norm_global,
                             }
                         ).to_csv(
                             f"{save_dir}/{resname}_selected_channels.csv", index=False
@@ -573,6 +580,8 @@ while top_k >= MIN_TOP_K:
                     "best_epoch": None if best_epoch is None else int(best_epoch),
                     "test_acc": float(test_acc),
                     "selected_channel_idx": selected_channels,
+                    "selected_channel_scores_norm_global": selected_channel_scores_norm_global,
+                    "score_norm_scope": "global_all_channels",
                     "selected_channel_names": selected_channel_names,
                 }
                 global_results.append(result_entry)

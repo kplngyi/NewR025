@@ -523,6 +523,7 @@ while top_k >= MIN_TOP_K:
                     "selected_pair_scores_norm": [
                         float(pair_scores[i]) for i in selected_pair_indices
                     ],
+                    "score_norm_scope": "global_all_channels",
                     "pair_score_mean": pair_score_mean,
                     "pair_score_std": pair_score_std,
                     "pair_score_min": pair_score_min,
