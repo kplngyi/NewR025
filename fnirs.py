@@ -14,19 +14,22 @@ from runtime_utils import (
 )
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--batch_size', type=int, default=64)
-parser.add_argument('--epochs', type=int, default=30)
-parser.add_argument('--early_stop_patience', type=int, default=20)
-parser.add_argument('--early_stop_monitor', type=str, default='valid_loss')
-parser.add_argument('--early_stop_threshold', type=float, default=1e-3)
-parser.add_argument('--data_dir', type=str, default='PPfNIRS')
-parser.add_argument('--model', type=str, default='shallow', choices=['shallow', 'temporal_se'])
+parser.add_argument("--batch_size", type=int, default=None)
+parser.add_argument("--epochs", type=int, default=None)
+parser.add_argument("--early_stop_patience", type=int, default=20)
+parser.add_argument("--early_stop_monitor", type=str, default="valid_loss")
+parser.add_argument("--early_stop_threshold", type=float, default=1e-3)
+parser.add_argument("--data_dir", type=str, default="PPfNIRS")
+parser.add_argument(
+    "--model", type=str, default="shallow", choices=["shallow", "temporal_se"]
+)
 args = parse_known_args(add_common_runtime_args(parser))
 # 提取fnirs 的fif文件
 
 import os
 import mne
 import numpy as np
+
 cwd = os.getcwd()
 project_root = resolve_project_root(__file__, args.project_root)
 runtime_dirs = prepare_runtime_dirs(project_root, args.output_root)
@@ -35,10 +38,14 @@ target_path = resolve_path(args.data_dir, project_root)
 print("当前工作目录是：", cwd)
 print("项目根目录是：", project_root)
 os.chdir(project_root)
-filesA1 = [str(target_path / f) for f in os.listdir(target_path) if f.endswith('.fif') and 'A1' in f]
+filesA1 = [
+    str(target_path / f)
+    for f in os.listdir(target_path)
+    if f.endswith(".fif") and "A1" in f
+]
 filesA1 = sorted(filesA1)
 if args.files_limit:
-    filesA1 = filesA1[:args.files_limit]
+    filesA1 = filesA1[: args.files_limit]
 print(filesA1)
 
 import os
@@ -52,7 +59,8 @@ import pandas as pd
 
 # Matplotlib backend for headless servers
 import matplotlib
-matplotlib.use('Agg')
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import torch
@@ -74,11 +82,13 @@ from skorch.dataset import Dataset as SkorchDataset
 # 超参数
 # from config import config
 import yaml
+
 # 读取配置文件
 with open(resolve_path(args.config_path, project_root), "r") as f:
     config = yaml.safe_load(f)
 # Keep MNE informational chatter out of training logs.
 mne.set_log_level("WARNING")
+
 
 class Tee:
     def __init__(self, *streams):
@@ -92,6 +102,7 @@ class Tee:
     def flush(self):
         for stream in self.streams:
             stream.flush()
+
 
 # ------------------ 用户配置区（请根据需要修改） ------------------
 # 如果你想跳过前几个文件，可修改切片；默认全部处理
@@ -123,6 +134,7 @@ seed = config["seed"]
 save_dir = runtime_dirs["output_dir"] / "ResfNIRS"
 os.makedirs(save_dir, exist_ok=True)
 
+
 # ------------------ 辅助函数 ------------------
 def fisher_score_channels_from_windows_dataset(windows_dataset):
     """
@@ -142,7 +154,9 @@ def fisher_score_channels_from_windows_dataset(windows_dataset):
         X_i, y_i, _ = windows_dataset[i]
         X_i = np.array(X_i)
         if X_i.shape[0] != n_channels:
-            raise ValueError(f"Inconsistent channel count at window {i}: {X_i.shape[0]} vs {n_channels}")
+            raise ValueError(
+                f"Inconsistent channel count at window {i}: {X_i.shape[0]} vs {n_channels}"
+            )
         F[i, :] = np.mean(np.abs(X_i), axis=1)
         ys[i] = int(y_i)
     classes = np.unique(ys)
@@ -162,6 +176,7 @@ def fisher_score_channels_from_windows_dataset(windows_dataset):
     rank_idx = np.argsort(scores)[::-1]
     return rank_idx, scores
 
+
 def extract_X_y_from_sample_list(sample_list):
     X_list = []
     y_list = []
@@ -172,25 +187,29 @@ def extract_X_y_from_sample_list(sample_list):
     y_all = np.array(y_list)
     return X_all, y_all
 
+
 def plot_and_save(cm, labels, title, fname):
     disp = ConfusionMatrixDisplay(cm, display_labels=labels)
-    fig, ax = plt.subplots(figsize=(4,4))
-    disp.plot(ax=ax, cmap="Blues", colorbar=False, values_format='d')
+    fig, ax = plt.subplots(figsize=(4, 4))
+    disp.plot(ax=ax, cmap="Blues", colorbar=False, values_format="d")
     ax.set_title(title)
     fig.tight_layout()
     fig.savefig(fname, dpi=300)
     plt.close(fig)
 
+
 while top_k >= MIN_TOP_K:
     # 存储结果
     global_results = []  # 列表，后面会 append dicts: {'subject':..., 'top_k':..., 'test_acc':..., ...}
     # ------------------ 输出重定向（安全） ------------------
-    now_time = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    now_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_dir = runtime_dirs["logs_dir"]
     os.makedirs(log_dir, exist_ok=True)
-    out_fname = os.path.join(log_dir, f'{now_time}_{top_k}_{n_epochs}_{lr}_trainfnirs.log')
+    out_fname = os.path.join(
+        log_dir, f"{now_time}_{top_k}_{n_epochs}_{lr}_trainfnirs.log"
+    )
     orig_stdout = sys.stdout
-    f_out = open(out_fname, 'w')
+    f_out = open(out_fname, "w")
     sys.stdout = Tee(orig_stdout, f_out)
     # 打印超参数
     print("\n📌 Training Hyperparameters:")
@@ -224,16 +243,26 @@ while top_k >= MIN_TOP_K:
                 raw = raw.copy()
 
                 # 从注释生成事件（先打印部分注释供调试）
-                print("Sample annotations (first 10):", list(raw.annotations.description[:10]))
+                print(
+                    "Sample annotations (first 10):",
+                    list(raw.annotations.description[:10]),
+                )
                 events, event_id = mne.events_from_annotations(raw)
                 print("Original event_id:", event_id)
 
                 # 匹配目标注释 (示例匹配 '11')，根据你的数据修改 target_desc
-                target_desc = '11'
+                target_desc = "11"
                 annotations = raw.annotations
-                matched_onsets = [onset for onset, desc in zip(annotations.onset, annotations.description)
-                                if desc.strip() == target_desc.strip()]
-                print("Matched onsets for target_desc '{}': {}".format(target_desc, matched_onsets))
+                matched_onsets = [
+                    onset
+                    for onset, desc in zip(annotations.onset, annotations.description)
+                    if desc.strip() == target_desc.strip()
+                ]
+                print(
+                    "Matched onsets for target_desc '{}': {}".format(
+                        target_desc, matched_onsets
+                    )
+                )
                 if len(matched_onsets) == 0:
                     print("No matched onsets found for this file. Skipping.")
                     continue
@@ -250,26 +279,38 @@ while top_k >= MIN_TOP_K:
                 ext_time = 1e10
                 for flex_time in matched_onsets:
                     rest_time = min(ext_time + ext_dur, flex_time - rest_dur)
-                    onsets.append(rest_time); durations.append(rest_dur); descriptions.append('Rest')
-                    onsets.append(flex_time); durations.append(flex_dur); descriptions.append('Elbow_Flexion')
+                    onsets.append(rest_time)
+                    durations.append(rest_dur)
+                    descriptions.append("Rest")
+                    onsets.append(flex_time)
+                    durations.append(flex_dur)
+                    descriptions.append("Elbow_Flexion")
                     ext_time = flex_time + flex_dur
-                    onsets.append(ext_time); durations.append(ext_dur); descriptions.append('Elbow_Extension')
+                    onsets.append(ext_time)
+                    durations.append(ext_dur)
+                    descriptions.append("Elbow_Extension")
 
-                new_annotations = mne.Annotations(onset=onsets, duration=durations, description=descriptions,
-                                                orig_time=raw.annotations.orig_time)
+                new_annotations = mne.Annotations(
+                    onset=onsets,
+                    duration=durations,
+                    description=descriptions,
+                    orig_time=raw.annotations.orig_time,
+                )
                 raw.set_annotations(raw.annotations + new_annotations)
 
                 # 自定义事件 id
-                custom_event_id = {'Rest': 0, 'Elbow_Flexion': 1, 'Elbow_Extension': 2}
-                events, event_id = mne.events_from_annotations(raw, event_id=custom_event_id)
+                custom_event_id = {"Rest": 0, "Elbow_Flexion": 1, "Elbow_Extension": 2}
+                events, event_id = mne.events_from_annotations(
+                    raw, event_id=custom_event_id
+                )
                 print("Custom event_id:", event_id)
 
                 # create windows_dataset
                 parts = [raw]
                 window_size = window_size_samples
                 window_stride = window_stride_samples
-                descriptions_bd = [{"event_code": [0,1,2], "subject": subject_id}]
-                mapping = {'Rest': 0, 'Elbow_Flexion': 1, 'Elbow_Extension': 2}
+                descriptions_bd = [{"event_code": [0, 1, 2], "subject": subject_id}]
+                mapping = {"Rest": 0, "Elbow_Flexion": 1, "Elbow_Extension": 2}
 
                 windows_dataset = create_from_mne_raw(
                     parts,
@@ -288,24 +329,34 @@ while top_k >= MIN_TOP_K:
                     continue
 
                 # ------------------ 通道选择（Fisher score） ------------------
-                rank_idx, channel_scores = fisher_score_channels_from_windows_dataset(windows_dataset)
+                rank_idx, channel_scores = fisher_score_channels_from_windows_dataset(
+                    windows_dataset
+                )
                 n_channels_total = np.array(windows_dataset[0][0]).shape[0]
                 top_k_use = min(top_k, n_channels_total)
                 selected_channels = list(rank_idx[:top_k_use])
-                print(f"Total channels: {n_channels_total}, selecting top_k = {top_k_use}")
+                print(
+                    f"Total channels: {n_channels_total}, selecting top_k = {top_k_use}"
+                )
                 print("Selected channel indices:", selected_channels)
                 print("Selected channel scores:", channel_scores[selected_channels])
 
                 # 保存所选通道名字（若 raw.info 有通道名）
                 try:
-                    ch_names = raw.info.get('ch_names', None)
+                    ch_names = raw.info.get("ch_names", None)
                     if ch_names is not None:
-                        selected_channel_names = [ch_names[i] for i in selected_channels]
-                        pd.DataFrame({
-                            "idx": selected_channels,
-                            "name": selected_channel_names,
-                            "score": channel_scores[selected_channels]
-                        }).to_csv(f"{save_dir}/{resname}_selected_channels.csv", index=False)
+                        selected_channel_names = [
+                            ch_names[i] for i in selected_channels
+                        ]
+                        pd.DataFrame(
+                            {
+                                "idx": selected_channels,
+                                "name": selected_channel_names,
+                                "score": channel_scores[selected_channels],
+                            }
+                        ).to_csv(
+                            f"{save_dir}/{resname}_selected_channels.csv", index=False
+                        )
                         print("Saved selected channel info to CSV.")
                 except Exception as e:
                     print("Warning saving selected channel names:", e)
@@ -325,8 +376,12 @@ while top_k >= MIN_TOP_K:
                     continue
 
                 indices = np.arange(len(selected_windows))
-                train_idx, temp_idx = train_test_split(indices, test_size=0.3, stratify=labels, random_state=710)
-                valid_idx, test_idx = train_test_split(temp_idx, test_size=0.5, stratify=labels[temp_idx], random_state=710)
+                train_idx, temp_idx = train_test_split(
+                    indices, test_size=0.3, stratify=labels, random_state=710
+                )
+                valid_idx, test_idx = train_test_split(
+                    temp_idx, test_size=0.5, stratify=labels[temp_idx], random_state=710
+                )
 
                 train_set = [selected_windows[i] for i in train_idx]
                 valid_set = [selected_windows[i] for i in valid_idx]
@@ -336,17 +391,27 @@ while top_k >= MIN_TOP_K:
                 X_valid, y_valid = extract_X_y_from_sample_list(valid_set)
                 X_test, y_test = extract_X_y_from_sample_list(test_set)
 
-                print("Train/Valid/Test sizes:", X_train.shape[0], X_valid.shape[0], X_test.shape[0])
-                print("Shapes (n_trials, n_ch_sel, n_time):", X_train.shape, X_valid.shape, X_test.shape)
+                print(
+                    "Train/Valid/Test sizes:",
+                    X_train.shape[0],
+                    X_valid.shape[0],
+                    X_test.shape[0],
+                )
+                print(
+                    "Shapes (n_trials, n_ch_sel, n_time):",
+                    X_train.shape,
+                    X_valid.shape,
+                    X_test.shape,
+                )
                 print("Selected channel count used for training:", X_train.shape[1])
 
                 # dtype 强制转换（skorch / torch 要求）
                 X_train = X_train.astype(np.float32)
                 X_valid = X_valid.astype(np.float32)
-                X_test  = X_test.astype(np.float32)
+                X_test = X_test.astype(np.float32)
                 y_train = y_train.astype(np.int64)
                 y_valid = y_valid.astype(np.int64)
-                y_test  = y_test.astype(np.int64)
+                y_test = y_test.astype(np.int64)
 
                 # ------------------ 随机种子与设备 ------------------
                 cuda = torch.cuda.is_available()
@@ -373,7 +438,9 @@ while top_k >= MIN_TOP_K:
                     model.cuda()
 
                 # ------------------ 损失函数与 class weights ------------------
-                class_weights = compute_class_weight('balanced', classes=classes, y=y_train)
+                class_weights = compute_class_weight(
+                    "balanced", classes=classes, y=y_train
+                )
                 class_weights = torch.FloatTensor(class_weights).to(device)
                 criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
 
@@ -390,7 +457,12 @@ while top_k >= MIN_TOP_K:
                     batch_size=batch_size,
                     callbacks=[
                         "accuracy",
-                        ("lr_scheduler", LRScheduler("CosineAnnealingLR", T_max=max(1, n_epochs - 1))),
+                        (
+                            "lr_scheduler",
+                            LRScheduler(
+                                "CosineAnnealingLR", T_max=max(1, n_epochs - 1)
+                            ),
+                        ),
                         (
                             "early_stopping",
                             EarlyStopping(
@@ -436,33 +508,49 @@ while top_k >= MIN_TOP_K:
                 cm_test = confusion_matrix(y_test, y_pred_test, labels=labels_for_cm)
 
                 # ---------- 保存结果 ----------
-                plot_and_save(cm_test, labels_for_cm, "Confusion Matrix (Test)", f"{save_dir}/{resname}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.png")
-                pd.DataFrame(cm_test, index=labels_for_cm, columns=labels_for_cm).to_csv(f"{save_dir}/{resname}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.csv", index=True)
+                plot_and_save(
+                    cm_test,
+                    labels_for_cm,
+                    "Confusion Matrix (Test)",
+                    f"{save_dir}/{resname}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.png",
+                )
+                pd.DataFrame(
+                    cm_test, index=labels_for_cm, columns=labels_for_cm
+                ).to_csv(
+                    f"{save_dir}/{resname}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.csv",
+                    index=True,
+                )
                 print("CSV 已保存到", save_dir)
                 # ---------- 将结果记录到 global_results（用于后续比较） ----------
                 try:
-                    ch_names = raw.info.get('ch_names', None)
-                    selected_channel_names = [ch_names[i] for i in selected_channels] if ch_names is not None else []
+                    ch_names = raw.info.get("ch_names", None)
+                    selected_channel_names = (
+                        [ch_names[i] for i in selected_channels]
+                        if ch_names is not None
+                        else []
+                    )
                 except Exception:
                     selected_channel_names = []
 
                 result_entry = {
-                    'subject': subject_id,
-                    'file': resname,
-                    'top_k': int(top_k_use),
-                    'n_channels_total': int(n_channels_total),
-                    'n_channels_selected': int(len(selected_channels)),
-                    'n_train': int(X_train.shape[0]),
-                    'n_valid': int(X_valid.shape[0]),
-                    'n_test': int(X_test.shape[0]),
-                    'trained_epochs': int(actual_epochs),
-                    'early_stop_monitor': early_stop_monitor,
-                    'early_stop_patience': int(early_stop_patience),
-                    'best_valid_score': None if best_valid_score is None else float(best_valid_score),
-                    'best_epoch': None if best_epoch is None else int(best_epoch),
-                    'test_acc': float(test_acc),
-                    'selected_channel_idx': selected_channels,
-                    'selected_channel_names': selected_channel_names,
+                    "subject": subject_id,
+                    "file": resname,
+                    "top_k": int(top_k_use),
+                    "n_channels_total": int(n_channels_total),
+                    "n_channels_selected": int(len(selected_channels)),
+                    "n_train": int(X_train.shape[0]),
+                    "n_valid": int(X_valid.shape[0]),
+                    "n_test": int(X_test.shape[0]),
+                    "trained_epochs": int(actual_epochs),
+                    "early_stop_monitor": early_stop_monitor,
+                    "early_stop_patience": int(early_stop_patience),
+                    "best_valid_score": None
+                    if best_valid_score is None
+                    else float(best_valid_score),
+                    "best_epoch": None if best_epoch is None else int(best_epoch),
+                    "test_acc": float(test_acc),
+                    "selected_channel_idx": selected_channels,
+                    "selected_channel_names": selected_channel_names,
                 }
                 global_results.append(result_entry)
                 # 清理释放内存 / GPU
@@ -483,9 +571,9 @@ while top_k >= MIN_TOP_K:
                 traceback.print_exc()
                 # 尝试释放内存并继续
                 try:
-                    if 'model' in locals():
+                    if "model" in locals():
                         del model
-                    if 'clf' in locals():
+                    if "clf" in locals():
                         del clf
                     torch.cuda.empty_cache()
                     gc.collect()
@@ -499,7 +587,9 @@ while top_k >= MIN_TOP_K:
         print(f"Script finished. Log saved to {out_fname}")
     ## 保存csv
     summary_df = pd.DataFrame(global_results)
-    summary_csv = os.path.join(save_dir, f"summary_{n_epochs}_{batch_size}_{top_k}_results.csv")
+    summary_csv = os.path.join(
+        save_dir, f"summary_{n_epochs}_{batch_size}_{top_k}_results.csv"
+    )
     summary_df.to_csv(summary_csv, index=False)
     print("Saved summary CSV:", summary_csv)
     top_k = top_k - TOP_K_STEP

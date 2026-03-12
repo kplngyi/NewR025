@@ -14,8 +14,8 @@ from runtime_utils import (
 )
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--batch_size", type=int, default=32)
-parser.add_argument("--epochs", type=int, default=300)
+parser.add_argument("--batch_size", type=int, default=None)
+parser.add_argument("--epochs", type=int, default=None)
 parser.add_argument("--early_stop_patience", type=int, default=20)
 parser.add_argument("--early_stop_monitor", type=str, default="valid_loss")
 parser.add_argument("--early_stop_threshold", type=float, default=1e-3)

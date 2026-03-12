@@ -14,13 +14,15 @@ from runtime_utils import (
 )
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--batch_size', type=int, default=64)
-parser.add_argument('--epochs', type=int, default=30)
-parser.add_argument('--early_stop_patience', type=int, default=20)
-parser.add_argument('--early_stop_monitor', type=str, default='valid_loss')
-parser.add_argument('--early_stop_threshold', type=float, default=1e-3)
-parser.add_argument('--data_dir', type=str, default='FusionEEG-fNIRS')
-parser.add_argument('--model', type=str, default='shallow', choices=['shallow', 'temporal_se'])
+parser.add_argument("--batch_size", type=int, default=None)
+parser.add_argument("--epochs", type=int, default=None)
+parser.add_argument("--early_stop_patience", type=int, default=20)
+parser.add_argument("--early_stop_monitor", type=str, default="valid_loss")
+parser.add_argument("--early_stop_threshold", type=float, default=1e-3)
+parser.add_argument("--data_dir", type=str, default="FusionEEG-fNIRS")
+parser.add_argument(
+    "--model", type=str, default="shallow", choices=["shallow", "temporal_se"]
+)
 args = parse_known_args(add_common_runtime_args(parser))
 
 
@@ -40,14 +42,15 @@ fusion_files = os.listdir(fusion_dir)
 print(f"✅ 找到 Fusion(EEG + fNIRS) 数据: {fusion_files}")
 
 # 提取被试（如 N008_A1L）
-fusion_keys = set(f.split('_eeg_fnirs')[0] for f in fusion_files if f.endswith('_eeg_fnirs_raw.fif'))
+fusion_keys = set(
+    f.split("_eeg_fnirs")[0] for f in fusion_files if f.endswith("_eeg_fnirs_raw.fif")
+)
 
 # 取交集，保证匹配
 matched_keys = sorted(fusion_keys)
 
 print(f"✅ 找到匹配的 Fusion(EEG + fNIRS) 数据: {matched_keys}")
-print(f"共 {int(len(matched_keys)/2)} 个被试")
-
+print(f"共 {int(len(matched_keys) / 2)} 个被试")
 
 
 # fusion_pipeline_with_channel_selection.py
@@ -63,7 +66,8 @@ import mne
 
 # matplotlib backend for headless servers
 import matplotlib
-matplotlib.use('Agg')
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import torch
@@ -82,11 +86,13 @@ from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 
 # 超参数
 import yaml
+
 # 读取配置文件
 with open(resolve_path(args.config_path, project_root), "r") as f:
     config = yaml.safe_load(f)
 # Keep MNE informational chatter out of training logs.
 mne.set_log_level("WARNING")
+
 
 class Tee:
     def __init__(self, *streams):
@@ -101,6 +107,7 @@ class Tee:
         for stream in self.streams:
             stream.flush()
 
+
 # ------------------ 用户可能需要先定义的外部变量（请确保在运行前已定义） ------------------
 # 例如：
 # fusion_dir = "path/to/fusion_files"
@@ -114,6 +121,7 @@ class Tee:
 # orig_stdout = sys.stdout
 # f_out = open(out_fname, 'w')
 # sys.stdout = f_out
+
 
 # ------------------ 辅助函数 ------------------
 def fisher_score_channels_from_windows_dataset(windows_dataset):
@@ -134,7 +142,9 @@ def fisher_score_channels_from_windows_dataset(windows_dataset):
         X_i, y_i, _ = windows_dataset[i]
         X_i = np.array(X_i)
         if X_i.shape[0] != n_channels:
-            raise ValueError(f"Inconsistent channel count at window {i}: {X_i.shape[0]} vs {n_channels}")
+            raise ValueError(
+                f"Inconsistent channel count at window {i}: {X_i.shape[0]} vs {n_channels}"
+            )
         F[i, :] = np.mean(np.abs(X_i), axis=1)
         ys[i] = int(y_i)
     classes = np.unique(ys)
@@ -154,6 +164,7 @@ def fisher_score_channels_from_windows_dataset(windows_dataset):
     rank_idx = np.argsort(scores)[::-1]
     return rank_idx, scores
 
+
 def extract_X_y_from_sample_list(sample_list):
     X_list = []
     y_list = []
@@ -164,14 +175,16 @@ def extract_X_y_from_sample_list(sample_list):
     y_all = np.array(y_list)
     return X_all, y_all
 
+
 def plot_and_save(cm, labels, title, fname):
     disp = ConfusionMatrixDisplay(cm, display_labels=labels)
-    fig, ax = plt.subplots(figsize=(4,4))
-    disp.plot(ax=ax, cmap="Blues", colorbar=False, values_format='d')
+    fig, ax = plt.subplots(figsize=(4, 4))
+    disp.plot(ax=ax, cmap="Blues", colorbar=False, values_format="d")
     ax.set_title(title)
     fig.tight_layout()
     fig.savefig(fname, dpi=300)
     plt.close(fig)
+
 
 # --------------- 可配置参数 ---------------
 
@@ -197,12 +210,14 @@ seed = config["seed"]
 while top_k >= MIN_TOP_K:
     global_results = []  # 列表，后面会 append dicts: {'subject':..., 'top_k':..., 'test_acc':..., ...}
     # ------------------ 输出重定向（安全） ------------------
-    now_time = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    now_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_dir = runtime_dirs["logs_dir"]
     os.makedirs(log_dir, exist_ok=True)
-    out_fname = os.path.join(log_dir, f'{now_time}_{top_k}_{n_epochs}_{lr}_trainfusion.log')
+    out_fname = os.path.join(
+        log_dir, f"{now_time}_{top_k}_{n_epochs}_{lr}_trainfusion.log"
+    )
     orig_stdout = sys.stdout
-    f_out = open(out_fname, 'w')
+    f_out = open(out_fname, "w")
     sys.stdout = Tee(orig_stdout, f_out)
     # 打印超参数
     print("\n📌 Training Hyperparameters:")
@@ -222,7 +237,6 @@ while top_k >= MIN_TOP_K:
 
     save_dir = runtime_dirs["output_dir"] / "ResFusion"
     os.makedirs(save_dir, exist_ok=True)
-
 
     try:
         print("Start processing. Log ->", out_fname)
@@ -247,9 +261,9 @@ while top_k >= MIN_TOP_K:
                 window_stride = window_stride_samples
 
                 subject_id = key[:4]
-                event_codes = [0,1,2]
+                event_codes = [0, 1, 2]
                 descriptions_bd = [{"event_code": event_codes, "subject": subject_id}]
-                mapping = {'Rest': 0, 'Elbow_Flexion': 1, 'Elbow_Extension': 2}
+                mapping = {"Rest": 0, "Elbow_Flexion": 1, "Elbow_Extension": 2}
 
                 parts = [raw]
                 windows_dataset = create_from_mne_raw(
@@ -269,24 +283,32 @@ while top_k >= MIN_TOP_K:
                     continue
 
                 # ---------- 通道选择（Fisher score） ----------
-                rank_idx, channel_scores = fisher_score_channels_from_windows_dataset(windows_dataset)
+                rank_idx, channel_scores = fisher_score_channels_from_windows_dataset(
+                    windows_dataset
+                )
                 n_channels_total = np.array(windows_dataset[0][0]).shape[0]
                 top_k_use = min(top_k, n_channels_total)
                 selected_channels = list(rank_idx[:top_k_use])
-                print(f"Total channels: {n_channels_total}, selecting top_k = {top_k_use}")
+                print(
+                    f"Total channels: {n_channels_total}, selecting top_k = {top_k_use}"
+                )
                 print("Selected channel indices:", selected_channels)
                 print("Selected channel scores:", channel_scores[selected_channels])
 
                 # 保存所选通道信息（若可用）
                 try:
-                    ch_names = raw.info.get('ch_names', None)
+                    ch_names = raw.info.get("ch_names", None)
                     if ch_names is not None:
-                        selected_channel_names = [ch_names[i] for i in selected_channels]
-                        pd.DataFrame({
-                            "idx": selected_channels,
-                            "name": selected_channel_names,
-                            "score": channel_scores[selected_channels]
-                        }).to_csv(f"{save_dir}/{key}_selected_channels.csv", index=False)
+                        selected_channel_names = [
+                            ch_names[i] for i in selected_channels
+                        ]
+                        pd.DataFrame(
+                            {
+                                "idx": selected_channels,
+                                "name": selected_channel_names,
+                                "score": channel_scores[selected_channels],
+                            }
+                        ).to_csv(f"{save_dir}/{key}_selected_channels.csv", index=False)
                         print("Saved selected channel info to CSV.")
                 except Exception as e:
                     print("Warning saving channel names:", e)
@@ -306,8 +328,12 @@ while top_k >= MIN_TOP_K:
                     continue
 
                 indices = np.arange(len(selected_windows))
-                train_idx, temp_idx = train_test_split(indices, test_size=0.3, stratify=labels, random_state=710)
-                valid_idx, test_idx = train_test_split(temp_idx, test_size=0.5, stratify=labels[temp_idx], random_state=710)
+                train_idx, temp_idx = train_test_split(
+                    indices, test_size=0.3, stratify=labels, random_state=710
+                )
+                valid_idx, test_idx = train_test_split(
+                    temp_idx, test_size=0.5, stratify=labels[temp_idx], random_state=710
+                )
 
                 train_set = [selected_windows[i] for i in train_idx]
                 valid_set = [selected_windows[i] for i in valid_idx]
@@ -315,18 +341,28 @@ while top_k >= MIN_TOP_K:
 
                 X_train, y_train = extract_X_y_from_sample_list(train_set)
                 X_valid, y_valid = extract_X_y_from_sample_list(valid_set)
-                X_test,  y_test  = extract_X_y_from_sample_list(test_set)
+                X_test, y_test = extract_X_y_from_sample_list(test_set)
 
-                print("Train/Valid/Test sizes:", X_train.shape[0], X_valid.shape[0], X_test.shape[0])
-                print("Shapes (n_trials, n_ch_sel, n_time):", X_train.shape, X_valid.shape, X_test.shape)
+                print(
+                    "Train/Valid/Test sizes:",
+                    X_train.shape[0],
+                    X_valid.shape[0],
+                    X_test.shape[0],
+                )
+                print(
+                    "Shapes (n_trials, n_ch_sel, n_time):",
+                    X_train.shape,
+                    X_valid.shape,
+                    X_test.shape,
+                )
 
                 # dtype 强制转换
                 X_train = X_train.astype(np.float32)
                 X_valid = X_valid.astype(np.float32)
-                X_test  = X_test.astype(np.float32)
+                X_test = X_test.astype(np.float32)
                 y_train = y_train.astype(np.int64)
                 y_valid = y_valid.astype(np.int64)
-                y_test  = y_test.astype(np.int64)
+                y_test = y_test.astype(np.int64)
 
                 # ------------------ 随机种子与设备 ------------------
                 cuda = torch.cuda.is_available()
@@ -353,8 +389,12 @@ while top_k >= MIN_TOP_K:
                     model.cuda()
 
                 # ------------------ 损失函数与 class weights ------------------
-                class_weights = compute_class_weight('balanced', classes=classes, y=y_train)
-                class_weights = torch.tensor(class_weights, dtype=torch.float32).to(device)
+                class_weights = compute_class_weight(
+                    "balanced", classes=classes, y=y_train
+                )
+                class_weights = torch.tensor(class_weights, dtype=torch.float32).to(
+                    device
+                )
                 criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
 
                 # ------------------ Skorch Dataset for valid ------------------
@@ -371,7 +411,12 @@ while top_k >= MIN_TOP_K:
                     batch_size=batch_size,
                     callbacks=[
                         "accuracy",
-                        ("lr_scheduler", LRScheduler("CosineAnnealingLR", T_max=max(1, n_epochs - 1))),
+                        (
+                            "lr_scheduler",
+                            LRScheduler(
+                                "CosineAnnealingLR", T_max=max(1, n_epochs - 1)
+                            ),
+                        ),
                         (
                             "early_stopping",
                             EarlyStopping(
@@ -418,33 +463,48 @@ while top_k >= MIN_TOP_K:
 
                 # ---------- 保存结果 ----------
                 resname = f"{key}_"
-                plot_and_save(cm_test, labels_for_cm, "Confusion Matrix (Test)", f"{save_dir}/{resname}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.png")
-                pd.DataFrame(cm_test, index=labels_for_cm, columns=labels_for_cm).to_csv(f"{save_dir}/{resname}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.csv")
+                plot_and_save(
+                    cm_test,
+                    labels_for_cm,
+                    "Confusion Matrix (Test)",
+                    f"{save_dir}/{resname}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.png",
+                )
+                pd.DataFrame(
+                    cm_test, index=labels_for_cm, columns=labels_for_cm
+                ).to_csv(
+                    f"{save_dir}/{resname}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.csv"
+                )
                 print("Saved results to", save_dir)
                 # ---------- 将结果记录到 global_results（用于后续比较） ----------
                 try:
-                    ch_names = raw.info.get('ch_names', None)
-                    selected_channel_names = [ch_names[i] for i in selected_channels] if ch_names is not None else []
+                    ch_names = raw.info.get("ch_names", None)
+                    selected_channel_names = (
+                        [ch_names[i] for i in selected_channels]
+                        if ch_names is not None
+                        else []
+                    )
                 except Exception:
                     selected_channel_names = []
 
                 result_entry = {
-                    'subject': subject_id,
-                    'file': resname,
-                    'top_k': int(top_k_use),
-                    'n_channels_total': int(n_channels_total),
-                    'n_channels_selected': int(len(selected_channels)),
-                    'n_train': int(X_train.shape[0]),
-                    'n_valid': int(X_valid.shape[0]),
-                    'n_test': int(X_test.shape[0]),
-                    'trained_epochs': int(actual_epochs),
-                    'early_stop_monitor': early_stop_monitor,
-                    'early_stop_patience': int(early_stop_patience),
-                    'best_valid_score': None if best_valid_score is None else float(best_valid_score),
-                    'best_epoch': None if best_epoch is None else int(best_epoch),
-                    'test_acc': float(test_acc),
-                    'selected_channel_idx': selected_channels,
-                    'selected_channel_names': selected_channel_names,
+                    "subject": subject_id,
+                    "file": resname,
+                    "top_k": int(top_k_use),
+                    "n_channels_total": int(n_channels_total),
+                    "n_channels_selected": int(len(selected_channels)),
+                    "n_train": int(X_train.shape[0]),
+                    "n_valid": int(X_valid.shape[0]),
+                    "n_test": int(X_test.shape[0]),
+                    "trained_epochs": int(actual_epochs),
+                    "early_stop_monitor": early_stop_monitor,
+                    "early_stop_patience": int(early_stop_patience),
+                    "best_valid_score": None
+                    if best_valid_score is None
+                    else float(best_valid_score),
+                    "best_epoch": None if best_epoch is None else int(best_epoch),
+                    "test_acc": float(test_acc),
+                    "selected_channel_idx": selected_channels,
+                    "selected_channel_names": selected_channel_names,
                 }
                 global_results.append(result_entry)
                 # ---------- 清理 ----------
@@ -465,9 +525,9 @@ while top_k >= MIN_TOP_K:
                 traceback.print_exc()
                 # 尝试释放并继续下一个文件/键
                 try:
-                    if 'model' in locals():
+                    if "model" in locals():
                         del model
-                    if 'clf' in locals():
+                    if "clf" in locals():
                         del clf
                     torch.cuda.empty_cache()
                     gc.collect()
@@ -482,7 +542,9 @@ while top_k >= MIN_TOP_K:
         print("Processing finished. Log saved to", out_fname)
     ## 保存csv
     summary_df = pd.DataFrame(global_results)
-    summary_csv = os.path.join(save_dir, f"summary_{n_epochs}_{batch_size}_{top_k}_results.csv")
+    summary_csv = os.path.join(
+        save_dir, f"summary_{n_epochs}_{batch_size}_{top_k}_results.csv"
+    )
     summary_df.to_csv(summary_csv, index=False)
     print("Saved summary CSV:", summary_csv)
     top_k = top_k - TOP_K_STEP
