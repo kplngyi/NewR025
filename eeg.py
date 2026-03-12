@@ -14,16 +14,22 @@ from runtime_utils import (
 )
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--batch_size', type=int, default=32)
-parser.add_argument('--epochs', type=int, default=300)
-parser.add_argument('--early_stop_patience', type=int, default=20)
-parser.add_argument('--early_stop_monitor', type=str, default='valid_loss')
-parser.add_argument('--early_stop_threshold', type=float, default=1e-3)
-parser.add_argument('--data_dir', type=str, default='PPEEG')
-parser.add_argument('--device', type=str, default='auto')
-parser.add_argument('--model', type=str, default='temporal_se', choices=['shallow', 'temporal_se'])
-parser.add_argument('--fisher_method', type=str, default='tdpsd', choices=['bandpower', 'tdpsd'])
-parser.add_argument('--bandpower_mode', type=str, default='avg', choices=['alpha', 'beta', 'avg'])
+parser.add_argument("--batch_size", type=int, default=32)
+parser.add_argument("--epochs", type=int, default=300)
+parser.add_argument("--early_stop_patience", type=int, default=20)
+parser.add_argument("--early_stop_monitor", type=str, default="valid_loss")
+parser.add_argument("--early_stop_threshold", type=float, default=1e-3)
+parser.add_argument("--data_dir", type=str, default="PPEEG")
+parser.add_argument("--device", type=str, default="auto")
+parser.add_argument(
+    "--model", type=str, default="temporal_se", choices=["shallow", "temporal_se"]
+)
+parser.add_argument(
+    "--fisher_method", type=str, default="tdpsd", choices=["bandpower", "tdpsd"]
+)
+parser.add_argument(
+    "--bandpower_mode", type=str, default="avg", choices=["alpha", "beta", "avg"]
+)
 args = parse_known_args(add_common_runtime_args(parser))
 
 # 切换到项目根目录，兼容本地脚本和 Colab 工作目录
@@ -40,11 +46,16 @@ os.chdir(project_root)
 import os
 import mne
 import numpy as np
+
 target_path = resolve_path(args.data_dir, project_root)
-filesA1 = [str(target_path / f) for f in os.listdir(target_path) if f.endswith('.fif') and 'A1' in f and not f.startswith('.')]
+filesA1 = [
+    str(target_path / f)
+    for f in os.listdir(target_path)
+    if f.endswith(".fif") and "A1" in f and not f.startswith(".")
+]
 filesA1 = sorted(filesA1)
 if args.files_limit:
-    filesA1 = filesA1[:args.files_limit]
+    filesA1 = filesA1[: args.files_limit]
 print(filesA1)
 
 # filesA1 = filesA1[-2:]
@@ -82,6 +93,7 @@ from fe_u import (
 # 超参数
 # from config import config
 import yaml
+
 # 读取配置文件
 with open(resolve_path(args.config_path, project_root), "r") as f:
     config = yaml.safe_load(f)
@@ -103,6 +115,25 @@ class Tee:
             stream.flush()
 
 
+def plot_training_history(history, fname):
+    epochs = range(1, len(history) + 1)
+    train_losses = history[:, "train_loss"]
+    valid_losses = history[:, "valid_loss"]
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(epochs, train_losses, label="Train Loss", linewidth=2)
+    ax.plot(epochs, valid_losses, label="Valid Loss", linewidth=2)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.set_title("Training Convergence")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(fname, dpi=300)
+    plt.close(fig)
+    print(f"Saved convergence curve: {fname}")
+
+
 def resolve_training_device(device_arg):
     requested = (device_arg or "auto").strip().lower()
     cuda_available = torch.cuda.is_available()
@@ -116,7 +147,9 @@ def resolve_training_device(device_arg):
         return torch.device("cuda")
     if requested.startswith("cuda:"):
         if not cuda_available:
-            raise RuntimeError(f"Requested --device {requested} but CUDA is not available.")
+            raise RuntimeError(
+                f"Requested --device {requested} but CUDA is not available."
+            )
         try:
             gpu_index = int(requested.split(":", 1)[1])
         except ValueError as exc:
@@ -131,8 +164,8 @@ def resolve_training_device(device_arg):
 
 
 def get_fisher_method_tag(method, bandpower_mode):
-    if method == 'bandpower':
-        return f'bandpower_{bandpower_mode}'
+    if method == "bandpower":
+        return f"bandpower_{bandpower_mode}"
     return method
 
 
@@ -170,14 +203,18 @@ fisher_method_tag = get_fisher_method_tag(args.fisher_method, args.bandpower_mod
 while top_k >= MIN_TOP_K:
     global_results = []  # 列表，后面会 append dicts: {'subject':..., 'top_k':..., 'test_acc':..., ...}
     # ------------------ 输出重定向（安全） ------------------
-    now_time = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    now_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_dir = runtime_dirs["logs_dir"]
     save_dir = runtime_dirs["output_dir"] / "ResEEG"
+    image_dir = save_dir / "images"
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(save_dir, exist_ok=True)
-    out_fname = os.path.join(log_dir, f'{now_time}_{fisher_method_tag}_{top_k}_{n_epochs}_{lr}_traineeg.log')
+    os.makedirs(image_dir, exist_ok=True)
+    out_fname = os.path.join(
+        log_dir, f"{now_time}_{fisher_method_tag}_{top_k}_{n_epochs}_{lr}_traineeg.log"
+    )
     orig_stdout = sys.stdout
-    f_out = open(out_fname, 'w')
+    f_out = open(out_fname, "w")
     sys.stdout = Tee(orig_stdout, f_out)
     # 打印超参数
     print("\n📌 Training Hyperparameters:")
@@ -216,10 +253,11 @@ while top_k >= MIN_TOP_K:
             events, event_id = mne.events_from_annotations(raw)
             print("Original event_id:", event_id)
             # 你的文件中目标注释描述
-            target_desc = 'Stimulus/S  5'
+            target_desc = "Stimulus/S  5"
             annotations = raw.annotations
             matched_onsets = [
-                onset for onset, desc in zip(annotations.onset, annotations.description)
+                onset
+                for onset, desc in zip(annotations.onset, annotations.description)
                 if desc.strip() == target_desc.strip()
             ]
             print("Matched onsets for 'Stimulus/S  5':", matched_onsets)
@@ -237,16 +275,16 @@ while top_k >= MIN_TOP_K:
             for flex_time in matched_onsets:
                 onsets.append(min(ext_time + ext_dur, flex_time - rest_dur))
                 durations.append(rest_dur)
-                descriptions.append('Rest')
+                descriptions.append("Rest")
 
                 onsets.append(flex_time)
                 durations.append(flex_dur)
-                descriptions.append('Elbow_Flexion')
+                descriptions.append("Elbow_Flexion")
 
                 ext_time = flex_time + flex_dur
                 onsets.append(ext_time)
                 durations.append(ext_dur)
-                descriptions.append('Elbow_Extension')
+                descriptions.append("Elbow_Extension")
 
             new_annotations = mne.Annotations(
                 onset=onsets,
@@ -257,13 +295,17 @@ while top_k >= MIN_TOP_K:
             raw.set_annotations(raw.annotations + new_annotations)
 
             # 自定义事件 id
-            custom_event_id = {'Rest': 0, 'Elbow_Flexion': 1, 'Elbow_Extension': 2}
-            events, event_id = mne.events_from_annotations(raw, event_id=custom_event_id)
+            custom_event_id = {"Rest": 0, "Elbow_Flexion": 1, "Elbow_Extension": 2}
+            events, event_id = mne.events_from_annotations(
+                raw, event_id=custom_event_id
+            )
             print("Custom event_id:", event_id)
 
             # 使用 braindecode create_from_mne_raw 生成 windows_dataset
-            descriptions_braindecode = [{"event_code": [0, 1, 2], "subject": subject_id}]
-            mapping = {'Rest': 0, 'Elbow_Flexion': 1, 'Elbow_Extension': 2}
+            descriptions_braindecode = [
+                {"event_code": [0, 1, 2], "subject": subject_id}
+            ]
+            mapping = {"Rest": 0, "Elbow_Flexion": 1, "Elbow_Extension": 2}
             parts = [raw]
 
             windows_dataset = create_from_mne_raw(
@@ -278,16 +320,18 @@ while top_k >= MIN_TOP_K:
             )
             print("Created windows_dataset, length:", len(windows_dataset))
 
-            if args.fisher_method == 'bandpower':
-                fs = float(raw.info['sfreq'])
-                rank_idx, channel_scores = fisher_score_channels_alpha_beta_from_windows_dataset(
-                    windows_dataset,
-                    fs=fs,
-                    mode=args.bandpower_mode,
+            if args.fisher_method == "bandpower":
+                fs = float(raw.info["sfreq"])
+                rank_idx, channel_scores = (
+                    fisher_score_channels_alpha_beta_from_windows_dataset(
+                        windows_dataset,
+                        fs=fs,
+                        mode=args.bandpower_mode,
+                    )
                 )
             else:
-                rank_idx, channel_scores, _ = fisher_score_channels_from_windows_dataset_tdpsd(
-                    windows_dataset
+                rank_idx, channel_scores, _ = (
+                    fisher_score_channels_from_windows_dataset_tdpsd(windows_dataset)
                 )
 
             n_channels_total = np.array(windows_dataset[0][0]).shape[0]
@@ -342,8 +386,18 @@ while top_k >= MIN_TOP_K:
             X_valid, y_valid = extract_X_y_from_sample_list(valid_set)
             X_test, y_test = extract_X_y_from_sample_list(test_set)
 
-            print("Train/Valid/Test sizes:", X_train.shape[0], X_valid.shape[0], X_test.shape[0])
-            print("Shapes (n_trials, n_ch_sel, n_time):", X_train.shape, X_valid.shape, X_test.shape)
+            print(
+                "Train/Valid/Test sizes:",
+                X_train.shape[0],
+                X_valid.shape[0],
+                X_test.shape[0],
+            )
+            print(
+                "Shapes (n_trials, n_ch_sel, n_time):",
+                X_train.shape,
+                X_valid.shape,
+                X_test.shape,
+            )
             print("Selected channel count used for training:", X_train.shape[1])
 
             # ------------------ 设置随机种子与设备 ------------------
@@ -375,7 +429,7 @@ while top_k >= MIN_TOP_K:
             print(model)
 
             # ------------------ 损失函数：根据训练集计算 class weights ------------------
-            class_weights = compute_class_weight('balanced', classes=classes, y=y_train)
+            class_weights = compute_class_weight("balanced", classes=classes, y=y_train)
             class_weights = torch.FloatTensor(class_weights).to(train_device)
             criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
 
@@ -390,7 +444,10 @@ while top_k >= MIN_TOP_K:
                 batch_size=batch_size,
                 callbacks=[
                     "accuracy",
-                    ("lr_scheduler", LRScheduler("CosineAnnealingLR", T_max=max(1, n_epochs - 1))),
+                    (
+                        "lr_scheduler",
+                        LRScheduler("CosineAnnealingLR", T_max=max(1, n_epochs - 1)),
+                    ),
                     (
                         "early_stopping",
                         EarlyStopping(
@@ -427,6 +484,14 @@ while top_k >= MIN_TOP_K:
             print(f"Best {early_stop_monitor}: {best_valid_score}")
             print(f"Best epoch: {best_epoch}")
 
+            plot_training_history(
+                clf.history,
+                os.path.join(
+                    image_dir,
+                    f"{resname}_{fisher_method_tag}_{batch_size}_{n_epochs}_{top_k}_{lr}_convergence.png",
+                ),
+            )
+
             # ------------------ 评估 ------------------
             y_pred_test = clf.predict(X_test)
             test_acc = clf.score(X_test, y=y_test)
@@ -439,7 +504,7 @@ while top_k >= MIN_TOP_K:
             def plot_and_save(cm, labels, title, fname):
                 disp = ConfusionMatrixDisplay(cm, display_labels=labels)
                 fig, ax = plt.subplots(figsize=(4, 4))
-                disp.plot(ax=ax, cmap="Blues", colorbar=False, values_format='d')
+                disp.plot(ax=ax, cmap="Blues", colorbar=False, values_format="d")
                 ax.set_title(title)
                 fig.tight_layout()
                 fig.savefig(fname, dpi=300)
@@ -450,48 +515,70 @@ while top_k >= MIN_TOP_K:
                 cm_test,
                 labels_for_cm,
                 "Confusion Matrix (Test)",
-                os.path.join(save_dir, f"{resname}_{fisher_method_tag}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.png"),
+                os.path.join(
+                    image_dir,
+                    f"{resname}_{fisher_method_tag}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.png",
+                ),
             )
             pd.DataFrame(cm_test, index=labels_for_cm, columns=labels_for_cm).to_csv(
-                os.path.join(save_dir, f"{resname}_{fisher_method_tag}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.csv")
+                os.path.join(
+                    save_dir,
+                    f"{resname}_{fisher_method_tag}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.csv",
+                )
             )
             print("CSV 已保存到", save_dir)
 
             # 记录所选通道到文件，便于审查
-            pd.DataFrame({
-                "selected_channel_idx": selected_channels,
-                "score": channel_scores[selected_channels],
-                "fisher_method": fisher_method_tag,
-            }).to_csv(os.path.join(save_dir, f"{resname}_{fisher_method_tag}_{top_k}_selected_channels.csv"), index=False)
+            pd.DataFrame(
+                {
+                    "selected_channel_idx": selected_channels,
+                    "score": channel_scores[selected_channels],
+                    "fisher_method": fisher_method_tag,
+                }
+            ).to_csv(
+                os.path.join(
+                    save_dir,
+                    f"{resname}_{fisher_method_tag}_{top_k}_selected_channels.csv",
+                ),
+                index=False,
+            )
             print("Selected channels saved.")
 
             # ---------- 将结果记录到 global_results（用于后续比较） ----------
             try:
-                ch_names = raw.info.get('ch_names', None)
-                selected_channel_names = [ch_names[i] for i in selected_channels] if ch_names is not None else []
+                ch_names = raw.info.get("ch_names", None)
+                selected_channel_names = (
+                    [ch_names[i] for i in selected_channels]
+                    if ch_names is not None
+                    else []
+                )
             except Exception:
                 selected_channel_names = []
 
             result_entry = {
-                'subject': subject_id,
-                'file': resname,
-                'top_k': int(top_k_use),
-                'n_channels_total': int(n_channels_total),
-                'n_channels_selected': int(len(selected_channels)),
-                'n_train': int(X_train.shape[0]),
-                'n_valid': int(X_valid.shape[0]),
-                'n_test': int(X_test.shape[0]),
-                'trained_epochs': int(actual_epochs),
-                'early_stop_monitor': early_stop_monitor,
-                'early_stop_patience': int(early_stop_patience),
-                'best_valid_score': None if best_valid_score is None else float(best_valid_score),
-                'best_epoch': None if best_epoch is None else int(best_epoch),
-                'test_acc': float(test_acc),
-                'fisher_method': fisher_method_tag,
-                'selected_channel_idx': selected_channels,
-                'selected_channel_scores': [float(s) for s in channel_scores[selected_channels]],
-                'all_channel_scores': [float(s) for s in channel_scores],
-                'selected_channel_names': selected_channel_names,
+                "subject": subject_id,
+                "file": resname,
+                "top_k": int(top_k_use),
+                "n_channels_total": int(n_channels_total),
+                "n_channels_selected": int(len(selected_channels)),
+                "n_train": int(X_train.shape[0]),
+                "n_valid": int(X_valid.shape[0]),
+                "n_test": int(X_test.shape[0]),
+                "trained_epochs": int(actual_epochs),
+                "early_stop_monitor": early_stop_monitor,
+                "early_stop_patience": int(early_stop_patience),
+                "best_valid_score": None
+                if best_valid_score is None
+                else float(best_valid_score),
+                "best_epoch": None if best_epoch is None else int(best_epoch),
+                "test_acc": float(test_acc),
+                "fisher_method": fisher_method_tag,
+                "selected_channel_idx": selected_channels,
+                "selected_channel_scores": [
+                    float(s) for s in channel_scores[selected_channels]
+                ],
+                "all_channel_scores": [float(s) for s in channel_scores],
+                "selected_channel_names": selected_channel_names,
             }
             global_results.append(result_entry)
 
@@ -514,7 +601,10 @@ while top_k >= MIN_TOP_K:
 
     # 保存summary csv
     summary_df = pd.DataFrame(global_results)
-    summary_csv = os.path.join(save_dir, f"summary_{fisher_method_tag}_{n_epochs}_{batch_size}_{top_k}_results.csv")
+    summary_csv = os.path.join(
+        save_dir,
+        f"summary_{fisher_method_tag}_{n_epochs}_{batch_size}_{top_k}_results.csv",
+    )
     summary_df.to_csv(summary_csv, index=False)
     print("Saved summary CSV:", summary_csv)
     top_k = top_k - TOP_K_STEP
