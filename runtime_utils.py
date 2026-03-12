@@ -25,7 +25,9 @@ def resolve_path(path_value, base_dir):
 
 
 def prepare_runtime_dirs(project_root, output_root=None):
-    output_dir = resolve_path(output_root, project_root) if output_root else Path(project_root)
+    output_dir = (
+        resolve_path(output_root, project_root) if output_root else Path(project_root)
+    )
     logs_dir = output_dir / "Logs"
     cache_dir = output_dir / ".cache"
     mplconfig_dir = output_dir / ".mplconfig"
@@ -48,7 +50,8 @@ def add_common_runtime_args(parser):
     parser.add_argument("--project_root", type=str, default=None)
     parser.add_argument("--output_root", type=str, default=None)
     parser.add_argument("--config_path", type=str, default="config.yaml")
-    parser.add_argument("--top_k_step", type=int, default=2)
+    # top_k_step 默认交给 config.yaml 控制；命令行显式传参时再覆盖。
+    parser.add_argument("--top_k_step", type=int, default=None)
     parser.add_argument("--min_top_k", type=int, default=None)
     parser.add_argument("--files_limit", type=int, default=None)
     return parser

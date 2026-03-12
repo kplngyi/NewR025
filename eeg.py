@@ -185,7 +185,10 @@ MAX_CHANNELS = 63
 MIN_TOP_K = math.ceil(MAX_CHANNELS * 0.1)
 if args.min_top_k is not None:
     MIN_TOP_K = args.min_top_k
-TOP_K_STEP = args.top_k_step
+# top_k 搜索步长优先使用命令行，其次使用共享配置，最后兜底为 10。
+TOP_K_STEP = (
+    args.top_k_step if args.top_k_step is not None else config.get("top_k_step", 10)
+)
 top_k = MAX_CHANNELS
 window_size_samples = config["window_size_samples"]
 window_stride_samples = config["window_stride_samples"]

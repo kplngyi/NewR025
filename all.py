@@ -23,9 +23,9 @@ def build_base_extra_args(args, script_key):
         getattr(args, config["data_dir_arg"]),
         "--config_path",
         args.config_path,
-        "--top_k_step",
-        str(args.top_k_step),
     ]
+    if args.top_k_step is not None:
+        extra_args.extend(["--top_k_step", str(args.top_k_step)])
     if args.files_limit is not None:
         extra_args.extend(["--files_limit", str(args.files_limit)])
     if args.min_top_k is not None:
@@ -133,7 +133,7 @@ def main():
     parser.add_argument("--project_root", type=str, default=None)
     parser.add_argument("--output_root", type=str, default="runs")
     parser.add_argument("--files_limit", type=int, default=None)
-    parser.add_argument("--top_k_step", type=int, default=2)
+    parser.add_argument("--top_k_step", type=int, default=None)
     parser.add_argument("--min_top_k", type=int, default=None)
     args = parser.parse_args()
 
