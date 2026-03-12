@@ -34,6 +34,12 @@ def build_base_extra_args(args, script_key):
         extra_args.extend(["--project_root", args.project_root])
     if args.model is not None:
         extra_args.extend(["--model", args.model])
+    if args.early_stop_patience is not None:
+        extra_args.extend(["--early_stop_patience", str(args.early_stop_patience)])
+    if args.early_stop_monitor is not None:
+        extra_args.extend(["--early_stop_monitor", args.early_stop_monitor])
+    if args.early_stop_threshold is not None:
+        extra_args.extend(["--early_stop_threshold", str(args.early_stop_threshold)])
     return extra_args
 
 
@@ -135,6 +141,9 @@ def main():
     parser.add_argument("--files_limit", type=int, default=None)
     parser.add_argument("--top_k_step", type=int, default=None)
     parser.add_argument("--min_top_k", type=int, default=None)
+    parser.add_argument("--early_stop_patience", type=int, default=None)
+    parser.add_argument("--early_stop_monitor", type=str, default=None)
+    parser.add_argument("--early_stop_threshold", type=float, default=None)
     args = parser.parse_args()
 
     script_dir = Path(__file__).resolve().parent

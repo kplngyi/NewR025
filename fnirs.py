@@ -16,9 +16,9 @@ from runtime_utils import (
 parser = argparse.ArgumentParser()
 parser.add_argument("--batch_size", type=int, default=None)
 parser.add_argument("--epochs", type=int, default=None)
-parser.add_argument("--early_stop_patience", type=int, default=20)
-parser.add_argument("--early_stop_monitor", type=str, default="valid_loss")
-parser.add_argument("--early_stop_threshold", type=float, default=1e-3)
+parser.add_argument("--early_stop_patience", type=int, default=None)
+parser.add_argument("--early_stop_monitor", type=str, default=None)
+parser.add_argument("--early_stop_threshold", type=float, default=None)
 parser.add_argument("--data_dir", type=str, default="PPfNIRS")
 parser.add_argument(
     "--model", type=str, default="shallow", choices=["shallow", "temporal_se"]
@@ -126,9 +126,23 @@ window_size_samples = config["window_size_samples"]
 window_stride_samples = config["window_stride_samples"]
 batch_size = args.batch_size if args.batch_size is not None else config["batch_size"]
 n_epochs = args.epochs if args.epochs is not None else config["n_epochs"]
-early_stop_patience = max(1, args.early_stop_patience)
-early_stop_monitor = args.early_stop_monitor
-early_stop_threshold = args.early_stop_threshold
+# 早停参数优先使用命令行，其次读取共享配置，最后使用兜底默认值。
+early_stop_patience = max(
+    1,
+    args.early_stop_patience
+    if args.early_stop_patience is not None
+    else config.get("early_stop_patience", 20),
+)
+early_stop_monitor = (
+    args.early_stop_monitor
+    if args.early_stop_monitor is not None
+    else config.get("early_stop_monitor", "valid_loss")
+)
+early_stop_threshold = (
+    args.early_stop_threshold
+    if args.early_stop_threshold is not None
+    else config.get("early_stop_threshold", 1e-3)
+)
 lr = config["lr"]
 weight_decay = config["weight_decay"]
 seed = config["seed"]
