@@ -125,9 +125,9 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        default=None,
+        default="temporal_se",
         choices=["shallow", "temporal_se"],
-        help="Optional model override passed to child scripts.",
+        help="默认使用 temporal_se，并传给子脚本；也可显式改为 shallow。",
     )
     parser.add_argument("--config_path", type=str, default="config.yaml")
     parser.add_argument("--project_root", type=str, default=None)
