@@ -73,6 +73,11 @@ from skorch.callbacks import EarlyStopping, LRScheduler
 from skorch.helper import predefined_split
 from skorch.dataset import Dataset as SkorchDataset
 
+from fnirs_pair_fisher import (
+    compute_pair_fisher_scores,
+    expand_pair_selection_to_channels,
+)
+
 import yaml
 
 with open(resolve_path(args.config_path, project_root), "r") as f:
@@ -135,197 +140,6 @@ PAIR_RESULT_LABEL = f"fnirs_pair_norm-{PAIR_NORM_METHOD}_feat-{PAIR_FEATURE_DESC
 
 save_dir = runtime_dirs["output_dir"] / "ResfNIRS_pair"
 os.makedirs(save_dir, exist_ok=True)
-
-
-def fisher_scores_from_feature_matrix(feature_matrix, labels):
-    classes = np.unique(labels)
-    mu_total = feature_matrix.mean(axis=0)
-    sb = np.zeros(feature_matrix.shape[1], dtype=float)
-    sw = np.zeros(feature_matrix.shape[1], dtype=float)
-    for c in classes:
-        feature_c = feature_matrix[labels == c]
-        nc = feature_c.shape[0]
-        if nc == 0:
-            continue
-        mu_c = feature_c.mean(axis=0)
-        var_c = feature_c.var(axis=0)
-        sb += nc * (mu_c - mu_total) ** 2
-        sw += nc * var_c
-    return sb / (sw + 1e-8)
-
-
-def zscore_vector(values):
-    values = np.asarray(values, dtype=float)
-    std = values.std()
-    if std < 1e-12:
-        return np.zeros_like(values)
-    return (values - values.mean()) / std
-
-
-def normalize_score_vector(values):
-    values = np.asarray(values, dtype=float)
-    value_min = values.min()
-    value_max = values.max()
-    if value_max - value_min < 1e-12:
-        return np.zeros_like(values)
-    return (values - value_min) / (value_max - value_min)
-
-
-def split_fnirs_channel_pairs(ch_names):
-    # 根据通道名中的 hbo/hbr 后缀自动配对，而不是假设固定顺序。
-    pair_lookup = {}
-    pair_order = []
-    for idx, name in enumerate(ch_names):
-        lower_name = name.lower()
-        if lower_name.endswith(" hbo"):
-            chroma = "hbo"
-            pair_name = name[:-4]
-        elif lower_name.endswith(" hbr"):
-            chroma = "hbr"
-            pair_name = name[:-4]
-        else:
-            continue
-
-        if pair_name not in pair_lookup:
-            pair_lookup[pair_name] = {
-                "pair_name": pair_name,
-                "hbo_idx": None,
-                "hbr_idx": None,
-            }
-            pair_order.append(pair_name)
-        pair_lookup[pair_name][f"{chroma}_idx"] = idx
-
-    pair_infos = []
-    for pair_idx, pair_name in enumerate(pair_order):
-        pair_info = pair_lookup[pair_name]
-        if pair_info["hbo_idx"] is None or pair_info["hbr_idx"] is None:
-            continue
-        pair_infos.append(
-            {
-                "pair_idx": pair_idx,
-                "pair_name": pair_name,
-                "hbo_idx": pair_info["hbo_idx"],
-                "hbr_idx": pair_info["hbr_idx"],
-                "hbo_name": ch_names[pair_info["hbo_idx"]],
-                "hbr_name": ch_names[pair_info["hbr_idx"]],
-            }
-        )
-
-    if not pair_infos:
-        raise ValueError("未能从通道名中解析出 HbO/HbR 配对关系。")
-    return pair_infos
-
-
-def compute_slope_feature(signal_matrix):
-    time_axis = np.arange(signal_matrix.shape[1], dtype=float)
-    time_centered = time_axis - time_axis.mean()
-    denom = np.dot(time_centered, time_centered)
-    return signal_matrix @ time_centered / denom
-
-
-def fisher_score_channel_pairs_from_windows_dataset(windows_dataset, ch_names):
-    """
-    按位置对计算 fNIRS Fisher 分数。
-
-    核心思路：
-    1. 先根据通道名把 HbO/HbR 配成 44 对位置；
-    2. 对每个位置分别提取 mean / std / slope 三类特征；
-    3. 先在 HbO、HbR 内部分别融合三类特征，再按 HbO 0.7 + HbR 0.3 合成位置总分；
-    4. 排序对象是“位置对”，训练时再展开回对应的 HbO/HbR 两个通道。
-    """
-    n_windows = len(windows_dataset)
-    if n_windows == 0:
-        raise ValueError("windows_dataset is empty")
-
-    sample_X, _, _ = windows_dataset[0]
-    sample_X = np.asarray(sample_X)
-    n_channels = sample_X.shape[0]
-    pair_infos = split_fnirs_channel_pairs(ch_names)
-    n_pairs = len(pair_infos)
-
-    y_all = np.zeros(n_windows, dtype=int)
-    hbo_mean = np.zeros((n_windows, n_pairs), dtype=float)
-    hbo_std = np.zeros((n_windows, n_pairs), dtype=float)
-    hbo_slope = np.zeros((n_windows, n_pairs), dtype=float)
-    hbr_mean = np.zeros((n_windows, n_pairs), dtype=float)
-    hbr_std = np.zeros((n_windows, n_pairs), dtype=float)
-    hbr_slope = np.zeros((n_windows, n_pairs), dtype=float)
-
-    for i in range(n_windows):
-        X_i, y_i, _ = windows_dataset[i]
-        X_i = np.asarray(X_i)
-        if X_i.shape[0] != n_channels:
-            raise ValueError(
-                f"Inconsistent channel count at window {i}: {X_i.shape[0]} vs {n_channels}"
-            )
-
-        y_all[i] = int(y_i)
-        for pair_pos, pair_info in enumerate(pair_infos):
-            hbo_signal = X_i[pair_info["hbo_idx"]]
-            hbr_signal = X_i[pair_info["hbr_idx"]]
-
-            hbo_mean[i, pair_pos] = np.mean(hbo_signal)
-            hbo_std[i, pair_pos] = np.std(hbo_signal)
-            hbr_mean[i, pair_pos] = np.mean(hbr_signal)
-            hbr_std[i, pair_pos] = np.std(hbr_signal)
-
-        hbo_signals = X_i[[pair_info["hbo_idx"] for pair_info in pair_infos], :]
-        hbr_signals = X_i[[pair_info["hbr_idx"] for pair_info in pair_infos], :]
-        hbo_slope[i, :] = compute_slope_feature(hbo_signals)
-        hbr_slope[i, :] = compute_slope_feature(hbr_signals)
-
-    hbo_mean_score = fisher_scores_from_feature_matrix(hbo_mean, y_all)
-    hbo_std_score = fisher_scores_from_feature_matrix(hbo_std, y_all)
-    hbo_slope_score = fisher_scores_from_feature_matrix(hbo_slope, y_all)
-    hbr_mean_score = fisher_scores_from_feature_matrix(hbr_mean, y_all)
-    hbr_std_score = fisher_scores_from_feature_matrix(hbr_std, y_all)
-    hbr_slope_score = fisher_scores_from_feature_matrix(hbr_slope, y_all)
-
-    hbo_score = (
-        0.5 * zscore_vector(hbo_mean_score)
-        + 0.2 * zscore_vector(hbo_std_score)
-        + 0.3 * zscore_vector(hbo_slope_score)
-    )
-    hbr_score = (
-        0.5 * zscore_vector(hbr_mean_score)
-        + 0.2 * zscore_vector(hbr_std_score)
-        + 0.3 * zscore_vector(hbr_slope_score)
-    )
-    pair_scores = normalize_score_vector(0.7 * hbo_score + 0.3 * hbr_score)
-    rank_idx = np.argsort(pair_scores)[::-1]
-
-    pair_detail_rows = []
-    for pair_pos, pair_info in enumerate(pair_infos):
-        pair_detail_rows.append(
-            {
-                "pair_idx": pair_pos,
-                "pair_name": pair_info["pair_name"],
-                "hbo_idx": pair_info["hbo_idx"],
-                "hbr_idx": pair_info["hbr_idx"],
-                "hbo_name": pair_info["hbo_name"],
-                "hbr_name": pair_info["hbr_name"],
-                "hbo_mean_fisher": float(hbo_mean_score[pair_pos]),
-                "hbo_std_fisher": float(hbo_std_score[pair_pos]),
-                "hbo_slope_fisher": float(hbo_slope_score[pair_pos]),
-                "hbr_mean_fisher": float(hbr_mean_score[pair_pos]),
-                "hbr_std_fisher": float(hbr_std_score[pair_pos]),
-                "hbr_slope_fisher": float(hbr_slope_score[pair_pos]),
-                "hbo_score": float(hbo_score[pair_pos]),
-                "hbr_score": float(hbr_score[pair_pos]),
-                "pair_score": float(pair_scores[pair_pos]),
-            }
-        )
-    return rank_idx, pair_scores, pair_infos, pair_detail_rows
-
-
-def expand_pair_selection_to_channels(selected_pair_indices, pair_infos):
-    selected_channels = []
-    selected_pair_rows = []
-    for pair_idx in selected_pair_indices:
-        pair_info = pair_infos[pair_idx]
-        selected_channels.extend([pair_info["hbo_idx"], pair_info["hbr_idx"]])
-        selected_pair_rows.append(pair_info)
-    return selected_channels, selected_pair_rows
 
 
 def extract_X_y_from_sample_list(sample_list):
@@ -477,9 +291,7 @@ while top_k >= MIN_TOP_K:
                     )
 
                 pair_rank_idx, pair_scores, pair_infos, pair_detail_rows = (
-                    fisher_score_channel_pairs_from_windows_dataset(
-                        windows_dataset, ch_names
-                    )
+                    compute_pair_fisher_scores(windows_dataset, ch_names)
                 )
                 n_pairs_total = len(pair_infos)
                 top_k_use = min(top_k, n_pairs_total)

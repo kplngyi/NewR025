@@ -26,6 +26,8 @@ parser.add_argument(
     default="shallow",
     choices=["shallow", "temporal_se", "fusion_temporal_se"],
 )
+parser.add_argument("--top_k_eeg", type=int, default=None)
+parser.add_argument("--top_k_fnirs", type=int, default=None)
 args = parse_known_args(add_common_runtime_args(parser))
 
 
@@ -77,6 +79,11 @@ import torch
 from braindecode.datasets import create_from_mne_raw
 from braindecode import EEGClassifier
 from braindecode.util import set_random_seeds
+from fe_u import fisher_score_channels_from_windows_dataset_tdpsd
+from fnirs_pair_fisher import (
+    compute_pair_fisher_scores,
+    expand_pair_selection_to_channels,
+)
 from model_factory import build_model
 
 from skorch.callbacks import EarlyStopping, LRScheduler
@@ -209,6 +216,126 @@ def split_selected_channels_by_modality(raw, selected_channels):
     return eeg_channels + fnirs_channels, len(eeg_channels), len(fnirs_channels)
 
 
+def split_channel_indices_by_modality(raw):
+    # 根据通道类型拆出 EEG 与 fNIRS 索引，后续分别使用更适合各自模态的
+    # Fisher 特征进行筛选。
+    channel_types = raw.get_channel_types()
+    eeg_indices = []
+    fnirs_indices = []
+    for ch_idx, ch_type in enumerate(channel_types):
+        if ch_type == "eeg":
+            eeg_indices.append(ch_idx)
+        else:
+            fnirs_indices.append(ch_idx)
+    if not eeg_indices or not fnirs_indices:
+        raise ValueError("Fusion 数据中必须同时包含 EEG 与 fNIRS 通道。")
+    return eeg_indices, fnirs_indices
+
+
+def build_subset_windows_dataset(windows_dataset, channel_indices):
+    subset_windows = []
+    for X_i, y_i, meta_i in windows_dataset:
+        X_i = np.asarray(X_i)
+        subset_windows.append((X_i[channel_indices, :], int(y_i), meta_i))
+    return subset_windows
+
+
+def allocate_modality_top_k(
+    total_top_k, eeg_total, fnirs_total, top_k_eeg=None, top_k_fnirs=None
+):
+    # 如果用户显式指定了两个模态的保留通道数，就优先采用；否则按模态
+    # 最大通道数比例自动分配，并保证 fNIRS 通道数为偶数，方便成对保留。
+    if top_k_eeg is not None or top_k_fnirs is not None:
+        if top_k_eeg is None or top_k_fnirs is None:
+            raise ValueError(
+                "请同时提供 --top_k_eeg 和 --top_k_fnirs，或两个都不提供。"
+            )
+        eeg_keep = min(top_k_eeg, eeg_total)
+        fnirs_keep = min(top_k_fnirs, fnirs_total)
+        if fnirs_keep % 2 != 0:
+            raise ValueError("--top_k_fnirs 必须是偶数，这样才能按 HbO/HbR 成对保留。")
+        if eeg_keep + fnirs_keep > total_top_k:
+            raise ValueError("top_k_eeg + top_k_fnirs 不能大于当前总 top_k。")
+        return eeg_keep, fnirs_keep
+
+    eeg_keep = int(round(total_top_k * eeg_total / (eeg_total + fnirs_total)))
+    eeg_keep = max(1, min(eeg_keep, eeg_total, total_top_k - 2))
+    fnirs_keep = total_top_k - eeg_keep
+    fnirs_keep = min(fnirs_keep, fnirs_total)
+    if fnirs_keep % 2 != 0:
+        fnirs_keep = fnirs_keep - 1 if fnirs_keep > 1 else 2
+    if fnirs_keep < 2:
+        fnirs_keep = (
+            2
+            if fnirs_total >= 2 and total_top_k >= 3
+            else min(fnirs_total, total_top_k)
+        )
+    eeg_keep = min(eeg_total, total_top_k - fnirs_keep)
+    if eeg_keep < 1:
+        eeg_keep = min(eeg_total, 1)
+        fnirs_keep = min(fnirs_total, total_top_k - eeg_keep)
+        if fnirs_keep % 2 != 0:
+            fnirs_keep -= 1
+    return eeg_keep, fnirs_keep
+
+
+def select_fusion_channels_by_modality(
+    raw, windows_dataset, total_top_k, top_k_eeg=None, top_k_fnirs=None
+):
+    eeg_indices, fnirs_indices = split_channel_indices_by_modality(raw)
+    eeg_windows = build_subset_windows_dataset(windows_dataset, eeg_indices)
+    fnirs_windows = build_subset_windows_dataset(windows_dataset, fnirs_indices)
+    eeg_keep, fnirs_keep = allocate_modality_top_k(
+        total_top_k,
+        eeg_total=len(eeg_indices),
+        fnirs_total=len(fnirs_indices),
+        top_k_eeg=top_k_eeg,
+        top_k_fnirs=top_k_fnirs,
+    )
+
+    eeg_rank_idx, eeg_scores, eeg_sub_scores = (
+        fisher_score_channels_from_windows_dataset_tdpsd(eeg_windows)
+    )
+    eeg_selected_local = list(eeg_rank_idx[:eeg_keep])
+    eeg_selected_channels = [eeg_indices[idx] for idx in eeg_selected_local]
+
+    fnirs_ch_names = [raw.ch_names[idx] for idx in fnirs_indices]
+    fnirs_pair_rank_idx, fnirs_pair_scores, fnirs_pair_infos, fnirs_pair_rows = (
+        compute_pair_fisher_scores(fnirs_windows, fnirs_ch_names)
+    )
+    fnirs_pairs_keep = min(fnirs_keep // 2, len(fnirs_pair_infos))
+    fnirs_selected_pair_idx = list(fnirs_pair_rank_idx[:fnirs_pairs_keep])
+    fnirs_selected_local, _ = expand_pair_selection_to_channels(
+        fnirs_selected_pair_idx,
+        fnirs_pair_infos,
+    )
+    fnirs_selected_channels = [fnirs_indices[idx] for idx in fnirs_selected_local]
+
+    selected_channels = eeg_selected_channels + fnirs_selected_channels
+    channel_scores = np.zeros(len(raw.ch_names), dtype=float)
+    for local_idx, score in enumerate(eeg_scores):
+        channel_scores[eeg_indices[local_idx]] = float(score)
+    for pair_idx, pair_info in enumerate(fnirs_pair_infos):
+        pair_score = float(fnirs_pair_scores[pair_idx])
+        channel_scores[fnirs_indices[pair_info["hbo_idx"]]] = pair_score
+        channel_scores[fnirs_indices[pair_info["hbr_idx"]]] = pair_score
+
+    selection_info = {
+        "eeg_selected_channels": eeg_selected_channels,
+        "fnirs_selected_channels": fnirs_selected_channels,
+        "eeg_scores": eeg_scores,
+        "eeg_sub_scores": eeg_sub_scores,
+        "fnirs_pair_scores": fnirs_pair_scores,
+        "fnirs_pair_rows": fnirs_pair_rows,
+        "fnirs_selected_pair_idx": fnirs_selected_pair_idx,
+        "eeg_keep": len(eeg_selected_channels),
+        "fnirs_keep": len(fnirs_selected_channels),
+        "eeg_method": "tdpsd_norm",
+        "fnirs_method": "pair_mean-std-slope_norm",
+    }
+    return selected_channels, channel_scores, selection_info
+
+
 # --------------- 可配置参数 ---------------
 
 # 超参数（直接从 config 里取）
@@ -221,6 +348,11 @@ TOP_K_STEP = (
     args.top_k_step if args.top_k_step is not None else config.get("top_k_step", 10)
 )
 top_k = MAX_CHANNELS
+if args.top_k_eeg is not None or args.top_k_fnirs is not None:
+    if args.top_k_eeg is None or args.top_k_fnirs is None:
+        raise ValueError("请同时提供 --top_k_eeg 和 --top_k_fnirs，或两个都不提供。")
+    top_k = args.top_k_eeg + args.top_k_fnirs
+    MIN_TOP_K = top_k
 window_size_samples = config["window_size_samples"]
 window_stride_samples = config["window_stride_samples"]
 batch_size = args.batch_size if args.batch_size is not None else config["batch_size"]
@@ -324,13 +456,20 @@ while top_k >= MIN_TOP_K:
                     print("No windows created, skipping.")
                     continue
 
-                # ---------- 通道选择（Fisher score） ----------
-                rank_idx, channel_scores = fisher_score_channels_from_windows_dataset(
-                    windows_dataset
-                )
+                # ---------- 通道选择（按模态分别使用更适合的 Fisher 特征） ----------
                 n_channels_total = np.array(windows_dataset[0][0]).shape[0]
                 top_k_use = min(top_k, n_channels_total)
-                selected_channels = list(rank_idx[:top_k_use])
+                (
+                    selected_channels,
+                    channel_scores,
+                    selection_info,
+                ) = select_fusion_channels_by_modality(
+                    raw,
+                    windows_dataset,
+                    total_top_k=top_k_use,
+                    top_k_eeg=args.top_k_eeg,
+                    top_k_fnirs=args.top_k_fnirs,
+                )
                 ordered_selected_channels = selected_channels
                 eeg_channels_selected = None
                 fnirs_channels_selected = None
@@ -349,6 +488,10 @@ while top_k >= MIN_TOP_K:
                 )
                 print("Selected channel indices:", selected_channels)
                 print("Selected channel scores:", channel_scores[selected_channels])
+                print("EEG Fisher method:", selection_info["eeg_method"])
+                print("fNIRS Fisher method:", selection_info["fnirs_method"])
+                print("Selected EEG channel count:", selection_info["eeg_keep"])
+                print("Selected fNIRS channel count:", selection_info["fnirs_keep"])
                 if args.model == "fusion_temporal_se":
                     print(
                         "Ordered selected channel indices:", ordered_selected_channels
@@ -371,6 +514,12 @@ while top_k >= MIN_TOP_K:
                                 "idx": selected_channels,
                                 "name": selected_channel_names,
                                 "score": channel_scores[selected_channels],
+                                "modality": [
+                                    "EEG"
+                                    if idx in selection_info["eeg_selected_channels"]
+                                    else "fNIRS"
+                                    for idx in selected_channels
+                                ],
                                 "ordered_idx": ordered_selected_channels,
                                 "ordered_name": ordered_selected_channel_names,
                             }
@@ -558,6 +707,8 @@ while top_k >= MIN_TOP_K:
                     "subject": subject_id,
                     "file": resname,
                     "top_k": int(top_k_use),
+                    "top_k_eeg": int(selection_info["eeg_keep"]),
+                    "top_k_fnirs": int(selection_info["fnirs_keep"]),
                     "n_channels_total": int(n_channels_total),
                     "n_channels_selected": int(len(selected_channels)),
                     "n_eeg_channels_selected": None
@@ -577,6 +728,11 @@ while top_k >= MIN_TOP_K:
                     else float(best_valid_score),
                     "best_epoch": None if best_epoch is None else int(best_epoch),
                     "test_acc": float(test_acc),
+                    "eeg_fisher_method": selection_info["eeg_method"],
+                    "fnirs_fisher_method": selection_info["fnirs_method"],
+                    "fnirs_selected_pair_idx": selection_info[
+                        "fnirs_selected_pair_idx"
+                    ],
                     "selected_channel_idx": ordered_selected_channels,
                     "selected_channel_names": selected_channel_names,
                 }
@@ -586,10 +742,10 @@ while top_k >= MIN_TOP_K:
                 del X_train, y_train, X_valid, y_valid, X_test, y_test
                 del train_set, valid_set, test_set, selected_windows, windows_dataset
                 del (
-                    rank_idx,
                     channel_scores,
                     selected_channels,
                     ordered_selected_channels,
+                    selection_info,
                 )
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()

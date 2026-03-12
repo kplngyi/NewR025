@@ -32,14 +32,21 @@ def build_base_extra_args(args, script_key):
         extra_args.extend(["--min_top_k", str(args.min_top_k)])
     if args.project_root is not None:
         extra_args.extend(["--project_root", args.project_root])
-    if args.model is not None:
-        extra_args.extend(["--model", args.model])
+    model_override = getattr(args, f"model_{script_key}", None)
+    model_choice = model_override if model_override is not None else args.model
+    if model_choice is not None:
+        extra_args.extend(["--model", model_choice])
     if args.early_stop_patience is not None:
         extra_args.extend(["--early_stop_patience", str(args.early_stop_patience)])
     if args.early_stop_monitor is not None:
         extra_args.extend(["--early_stop_monitor", args.early_stop_monitor])
     if args.early_stop_threshold is not None:
         extra_args.extend(["--early_stop_threshold", str(args.early_stop_threshold)])
+    if script_key == "fusion":
+        if args.top_k_eeg is not None:
+            extra_args.extend(["--top_k_eeg", str(args.top_k_eeg)])
+        if args.top_k_fnirs is not None:
+            extra_args.extend(["--top_k_fnirs", str(args.top_k_fnirs)])
     return extra_args
 
 
@@ -132,8 +139,26 @@ def main():
         "--model",
         type=str,
         default="temporal_se",
+        choices=["shallow", "temporal_se", "fusion_temporal_se"],
+        help="默认使用 temporal_se，可显式改用任何支持的模型。",
+    )
+    parser.add_argument(
+        "--model_eeg",
+        type=str,
+        default=None,
         choices=["shallow", "temporal_se"],
-        help="默认使用 temporal_se，并传给子脚本；也可显式改为 shallow。",
+    )
+    parser.add_argument(
+        "--model_fnirs",
+        type=str,
+        default=None,
+        choices=["shallow", "temporal_se"],
+    )
+    parser.add_argument(
+        "--model_fusion",
+        type=str,
+        default=None,
+        choices=["shallow", "temporal_se", "fusion_temporal_se"],
     )
     parser.add_argument("--config_path", type=str, default="config.yaml")
     parser.add_argument("--project_root", type=str, default=None)
@@ -144,6 +169,8 @@ def main():
     parser.add_argument("--early_stop_patience", type=int, default=None)
     parser.add_argument("--early_stop_monitor", type=str, default=None)
     parser.add_argument("--early_stop_threshold", type=float, default=None)
+    parser.add_argument("--top_k_eeg", type=int, default=None)
+    parser.add_argument("--top_k_fnirs", type=int, default=None)
     args = parser.parse_args()
 
     script_dir = Path(__file__).resolve().parent

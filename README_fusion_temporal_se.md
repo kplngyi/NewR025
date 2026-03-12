@@ -4,7 +4,10 @@
 
 - 在 `model_factory.py` 中新增了 `fusion_temporal_se` 模型。
 - 在 `fusion.py` 中新增了 `--model fusion_temporal_se` 选项。
-- 当使用 `fusion_temporal_se` 时，`fusion.py` 会先做现有的 Fisher 通道选择，再把选中的通道重排为：`EEG 在前，fNIRS 在后`。
+- `fusion.py` 现在会按模态分别做通道选择：
+  - EEG 使用 `TDPSD` Fisher 分数；
+  - fNIRS 使用 `HbO/HbR` 成对的 `mean/std/slope` Fisher 分数；
+  - 之后再把选中的通道重排为：`EEG 在前，fNIRS 在后`。
 - 模型内部使用双分支结构：
   - EEG 分支单独编码 EEG 通道特征；
   - fNIRS 分支单独编码 fNIRS 通道特征；
@@ -21,7 +24,7 @@
 `fusion_temporal_se` 的核心流程如下：
 
 1. 输入张量形状为 `(batch, channels, time)`。
-2. `fusion.py` 先按模态把选中通道重排成：
+2. `fusion.py` 先分别完成 EEG / fNIRS 的 Fisher 通道筛选，再按模态把选中通道重排成：
    - 前半部分：EEG 通道
    - 后半部分：fNIRS 通道
 3. 模型内部切分为两条分支：
@@ -57,6 +60,16 @@ python fusion.py --model fusion_temporal_se
 python fusion.py --model fusion_temporal_se --batch_size 64 --epochs 50
 ```
 
+### 5. 显式指定两个模态各自保留多少通道
+
+```bash
+python fusion.py --model fusion_temporal_se --top_k_eeg 32 --top_k_fnirs 20
+```
+
+说明：
+- `--top_k_fnirs` 必须是偶数，因为 fNIRS 会按 HbO/HbR 成对保留。
+- 如果不传这两个参数，脚本会根据当前总 `top_k` 按模态规模自动分配。
+
 ## 对照实验建议
 
 建议按下面顺序做实验：
@@ -82,11 +95,13 @@ python fusion.py --model fusion_temporal_se --files_limit 1
 - 当使用 `fusion_temporal_se` 时，`selected_channels.csv` 中会额外保存：
   - `ordered_idx`
   - `ordered_name`
+  - `modality`
 
 这两个字段表示实际送入双分支模型时使用的通道顺序。
 
 ## 注意事项
 
 - `fusion_temporal_se` 要求本轮选中的通道里同时包含 EEG 和 fNIRS；如果某一轮筛选后只剩单一模态，脚本会报错并提示。
+- 当前 fusion 的通道选择不再共用单一特征，而是：EEG 用 TDPSD，fNIRS 用 pair-wise `mean/std/slope`。
 - 目前 `all.py` 仍然把同一个 `--model` 传给所有脚本，因此 `fusion_temporal_se` 更适合直接通过 `fusion.py` 单独运行。
 - 如果后续要把这个模型纳入批量实验，建议再把 `all.py` 改成支持按脚本分别指定模型。
