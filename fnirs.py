@@ -262,6 +262,8 @@ while top_k >= MIN_TOP_K:
         if len(filesA1) == 0:
             print("No .fif files found in target_path. Exiting.")
         for file in filesA1:
+            model = None
+            clf = None
             try:
                 resname = os.path.basename(file[:-4])
                 print("\n--- Processing file:", resname, " ---")
@@ -501,22 +503,16 @@ while top_k >= MIN_TOP_K:
                 # ------------------ 将 valid_set 转为 SkorchDataset 并构建 EEGClassifier ------------------
                 valid_ds = SkorchDataset(X_valid, y_valid)
 
-                clf = EEGClassifier(
-                    model,
-                    criterion=criterion,
-                    optimizer=torch.optim.AdamW,
-                    train_split=predefined_split(valid_ds),
-                    optimizer__lr=lr,
-                    optimizer__weight_decay=weight_decay,
-                    batch_size=batch_size,
-                    callbacks=[
-                        "accuracy",
-                        (
-                            "lr_scheduler",
-                            LRScheduler(
-                                "CosineAnnealingLR", T_max=max(1, n_epochs - 1)
-                            ),
-                        ),
+                use_early_stopping = args.model != "shallow"
+                callbacks = [
+                    "accuracy",
+                    (
+                        "lr_scheduler",
+                        LRScheduler("CosineAnnealingLR", T_max=max(1, n_epochs - 1)),
+                    ),
+                ]
+                if use_early_stopping:
+                    callbacks.append(
                         (
                             "early_stopping",
                             EarlyStopping(
@@ -525,10 +521,20 @@ while top_k >= MIN_TOP_K:
                                 threshold=early_stop_threshold,
                                 threshold_mode="abs",
                                 lower_is_better=(early_stop_monitor == "valid_loss"),
-                                load_best=True,
+                                load_best=use_early_stopping,
                             ),
-                        ),
-                    ],
+                        )
+                    )
+
+                clf = EEGClassifier(
+                    model,
+                    criterion=criterion,
+                    optimizer=torch.optim.AdamW,
+                    train_split=predefined_split(valid_ds),
+                    optimizer__lr=lr,
+                    optimizer__weight_decay=weight_decay,
+                    batch_size=batch_size,
+                    callbacks=callbacks,
                     device=device,
                     classes=classes,
                     max_epochs=n_epochs,
@@ -629,10 +635,8 @@ while top_k >= MIN_TOP_K:
                 traceback.print_exc()
                 # 尝试释放内存并继续
                 try:
-                    if "model" in locals():
-                        del model
-                    if "clf" in locals():
-                        del clf
+                    model = None
+                    clf = None
                     torch.cuda.empty_cache()
                     gc.collect()
                 except Exception:

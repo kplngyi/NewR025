@@ -625,22 +625,16 @@ while top_k >= MIN_TOP_K:
                 valid_ds = SkorchDataset(X_valid, y_valid)
 
                 # ------------------ 构建 EEGClassifier ------------------
-                clf = EEGClassifier(
-                    model,
-                    criterion=criterion,
-                    optimizer=torch.optim.AdamW,
-                    train_split=predefined_split(valid_ds),
-                    optimizer__lr=lr,
-                    optimizer__weight_decay=weight_decay,
-                    batch_size=batch_size,
-                    callbacks=[
-                        "accuracy",
-                        (
-                            "lr_scheduler",
-                            LRScheduler(
-                                "CosineAnnealingLR", T_max=max(1, n_epochs - 1)
-                            ),
-                        ),
+                use_early_stopping = args.model != "shallow"
+                callbacks = [
+                    "accuracy",
+                    (
+                        "lr_scheduler",
+                        LRScheduler("CosineAnnealingLR", T_max=max(1, n_epochs - 1)),
+                    ),
+                ]
+                if use_early_stopping:
+                    callbacks.append(
                         (
                             "early_stopping",
                             EarlyStopping(
@@ -649,10 +643,20 @@ while top_k >= MIN_TOP_K:
                                 threshold=early_stop_threshold,
                                 threshold_mode="abs",
                                 lower_is_better=(early_stop_monitor == "valid_loss"),
-                                load_best=True,
+                                load_best=use_early_stopping,
                             ),
-                        ),
-                    ],
+                        )
+                    )
+
+                clf = EEGClassifier(
+                    model,
+                    criterion=criterion,
+                    optimizer=torch.optim.AdamW,
+                    train_split=predefined_split(valid_ds),
+                    optimizer__lr=lr,
+                    optimizer__weight_decay=weight_decay,
+                    batch_size=batch_size,
+                    callbacks=callbacks,
                     device=device,
                     classes=classes,
                     max_epochs=n_epochs,
@@ -771,10 +775,8 @@ while top_k >= MIN_TOP_K:
                 traceback.print_exc()
                 # 尝试释放并继续下一个文件/键
                 try:
-                    if "model" in locals():
-                        del model
-                    if "clf" in locals():
-                        del clf
+                    model = None
+                    clf = None
                     torch.cuda.empty_cache()
                     gc.collect()
                 except Exception:

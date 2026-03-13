@@ -451,20 +451,16 @@ while top_k >= MIN_TOP_K:
             criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
 
             # ------------------ 构建 EEGClassifier 并训练 ------------------
-            clf = EEGClassifier(
-                model,
-                criterion=criterion,
-                optimizer=torch.optim.AdamW,
-                train_split=predefined_split(valid_set),
-                optimizer__lr=lr,
-                optimizer__weight_decay=weight_decay,
-                batch_size=batch_size,
-                callbacks=[
-                    "accuracy",
-                    (
-                        "lr_scheduler",
-                        LRScheduler("CosineAnnealingLR", T_max=max(1, n_epochs - 1)),
-                    ),
+            use_early_stopping = args.model != "shallow"
+            callbacks = [
+                "accuracy",
+                (
+                    "lr_scheduler",
+                    LRScheduler("CosineAnnealingLR", T_max=max(1, n_epochs - 1)),
+                ),
+            ]
+            if use_early_stopping:
+                callbacks.append(
                     (
                         "early_stopping",
                         EarlyStopping(
@@ -473,10 +469,20 @@ while top_k >= MIN_TOP_K:
                             threshold=early_stop_threshold,
                             threshold_mode="abs",
                             lower_is_better=(early_stop_monitor == "valid_loss"),
-                            load_best=True,
+                            load_best=use_early_stopping,
                         ),
-                    ),
-                ],
+                    )
+                )
+
+            clf = EEGClassifier(
+                model,
+                criterion=criterion,
+                optimizer=torch.optim.AdamW,
+                train_split=predefined_split(valid_set),
+                optimizer__lr=lr,
+                optimizer__weight_decay=weight_decay,
+                batch_size=batch_size,
+                callbacks=callbacks,
                 device=str(train_device),
                 classes=classes,
                 max_epochs=n_epochs,
