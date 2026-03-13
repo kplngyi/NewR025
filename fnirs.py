@@ -646,7 +646,7 @@ while top_k >= MIN_TOP_K:
     ## 保存csv
     summary_df = pd.DataFrame(global_results)
     summary_csv = os.path.join(
-        save_dir, f"summary_{n_epochs}_{batch_size}_{top_k}_results.csv"
+        save_dir, f"summary_{args.model}_{n_epochs}_{batch_size}_{top_k}_results.csv"
     )
     summary_df.to_csv(summary_csv, index=False)
     print("Saved summary CSV:", summary_csv)

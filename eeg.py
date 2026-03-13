@@ -622,7 +622,7 @@ while top_k >= MIN_TOP_K:
     summary_df = pd.DataFrame(global_results)
     summary_csv = os.path.join(
         save_dir,
-        f"summary_{fisher_method_tag}_{n_epochs}_{batch_size}_{top_k}_results.csv",
+        f"summary{args.model}_{fisher_method_tag}_{n_epochs}_{batch_size}_{top_k}_results.csv",
     )
     summary_df.to_csv(summary_csv, index=False)
     print("Saved summary CSV:", summary_csv)
