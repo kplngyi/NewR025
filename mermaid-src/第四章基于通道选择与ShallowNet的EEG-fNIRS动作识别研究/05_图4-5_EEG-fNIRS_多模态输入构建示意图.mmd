@@ -1,0 +1,27 @@
+%%{
+  init: {
+    'theme': 'base',
+    'themeVariables': {
+      'fontFamily': 'SimSun, Times New Roman',
+      'fontSize': '32px',
+      'primaryColor': '#fff',
+      'primaryBorderColor': '#333',
+      'lineColor': '#444',
+      'nodeSpacing': 60,
+      'rankSpacing': 80
+    }
+  }
+}%%
+flowchart LR
+    A1[EEG 通道排序
+与筛选] --> B1[优选 EEG
+通道]
+    A2[fNIRS 通道排序与筛选] --> B2[优选 fNIRS
+通道]
+    B1 --> C[输入层拼接
+融合]
+    B2 --> C
+    C --> D[多模态时间窗
+样本]
+    D --> E[ShallowNet
+分类]

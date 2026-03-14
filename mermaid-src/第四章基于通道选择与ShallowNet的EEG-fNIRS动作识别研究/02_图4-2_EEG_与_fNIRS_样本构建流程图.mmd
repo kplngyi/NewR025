@@ -1,0 +1,32 @@
+%%{
+  init: {
+    'theme': 'base',
+    'themeVariables': {
+      'fontFamily': 'SimSun, Times New Roman',
+      'fontSize': '32px',
+      'primaryColor': '#fff',
+      'primaryBorderColor': '#333',
+      'lineColor': '#444',
+      'nodeSpacing': 60,
+      'rankSpacing': 80
+    }
+  }
+}%%
+flowchart LR
+    A[连续脑信号] --> B[动作事件
+标注]
+    B --> C1[静息阶段
+Rest]
+    B --> C2[屈曲阶段
+Elbow_Flexion]
+    B --> C3[伸展阶段
+Elbow_Extension]
+    C1 --> D[滑动时间窗
+分段]
+    C2 --> D
+    C3 --> D
+    D --> E[窗口样本
+生成]
+    E --> F[训练集/
+    验证集/
+    测试集划分]

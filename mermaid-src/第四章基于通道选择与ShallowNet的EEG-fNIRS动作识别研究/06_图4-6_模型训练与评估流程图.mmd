@@ -1,0 +1,30 @@
+%%{
+  init: {
+    'theme': 'base',
+    'themeVariables': {
+      'fontFamily': 'SimSun, Times New Roman',
+      'fontSize': '32px',
+      'primaryColor': '#fff',
+      'primaryBorderColor': '#333',
+      'lineColor': '#444',
+      'nodeSpacing': 60,
+      'rankSpacing': 80
+    }
+  }
+}%%
+flowchart LR
+    A[优选通道
+样本] --> B[训练集]
+    A --> C[验证集]
+    A --> D[测试集]
+    B --> E[ShallowNet
+训练]
+    C --> F[训练过程
+监控]
+    E<-->F
+
+    E --> G[得到最终
+模型]
+    D --> H[识别
+    与评估]
+    G --> H

@@ -1,0 +1,30 @@
+%%{
+  init: {
+    'theme': 'base',
+    'themeVariables': {
+      'fontFamily': 'SimSun, Times New Roman',
+      'fontSize': '32px',
+      'primaryColor': '#fff',
+      'primaryBorderColor': '#333',
+      'lineColor': '#444',
+      'nodeSpacing': 60,
+      'rankSpacing': 80
+    }
+  }
+}%%
+flowchart LR
+    A[总 Top-K] --> B[EEG 通道
+分配]
+    A --> C[fNIRS 通道
+分配]
+    B --> D[EEG 优选
+通道]
+    C --> E[fNIRS 优选
+通道]
+    D --> F[多模态输入
+融合]
+    E --> F
+    F --> G[ShallowNet
+训练]
+    G --> H[融合识别
+性能分析]

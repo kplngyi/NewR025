@@ -1,0 +1,26 @@
+%%{
+  init: {
+    'theme': 'base',
+    'themeVariables': {
+      'fontFamily': 'SimSun, Times New Roman',
+      'fontSize': '32px',
+      'primaryColor': '#fff',
+      'primaryBorderColor': '#333',
+      'lineColor': '#444',
+      'nodeSpacing': 60,
+      'rankSpacing': 80
+    }
+  }
+}%%
+flowchart LR
+    A[全部 EEG
+通道] --> B[Fisher 排序]
+    B --> C[Top-K=
+全通道]
+    B --> D[Top-K
+递减]
+    C --> E[ShallowNet
+训练]
+    D --> E
+    E --> F[识别性能
+比较]

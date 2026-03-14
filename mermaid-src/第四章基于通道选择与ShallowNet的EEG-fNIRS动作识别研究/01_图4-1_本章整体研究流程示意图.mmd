@@ -1,0 +1,32 @@
+%%{
+  init: {
+    'theme': 'base',
+    'themeVariables': {
+      'fontFamily': 'SimSun, Times New Roman',
+      'fontSize': '32px',
+      'primaryColor': '#fff',
+      'primaryBorderColor': '#333',
+      'lineColor': '#444',
+      'nodeSpacing': 60,
+      'rankSpacing': 80
+    }
+  }
+}%%
+flowchart LR
+    A[原始 EEG 与
+fNIRS 信号] --> B[计算 Fisher
+分数]
+    B --> D[Top-K 通道
+排序与筛选]
+    D --> E1[EEG 单模态
+输入]
+    D --> E2[fNIRS 单模态
+输入]
+    D --> E3[EEG-fNIRS
+多模态输入]
+    E1 --> F[ShallowNet
+训练]
+    E2 --> F
+    E3 --> F
+    F --> G[准确率与
+混淆矩阵分析]

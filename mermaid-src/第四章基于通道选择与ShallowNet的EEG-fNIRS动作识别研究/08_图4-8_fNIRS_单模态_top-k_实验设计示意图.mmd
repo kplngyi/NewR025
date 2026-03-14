@@ -1,0 +1,26 @@
+%%{
+  init: {
+    'theme': 'base',
+    'themeVariables': {
+      'fontFamily': 'SimSun, Times New Roman',
+      'fontSize': '32px',
+      'primaryColor': '#fff',
+      'primaryBorderColor': '#333',
+      'lineColor': '#444',
+      'nodeSpacing': 60,
+      'rankSpacing': 80
+    }
+  }
+}%%
+flowchart LR
+    A[fNIRS
+位置对] --> B[位置对评分
+与排序]
+    B --> C[Top-K 位置对
+选择]
+    C --> D[HbO/HbR
+通道展开]
+    D --> E[ShallowNet
+训练]
+    E --> F[识别性能
+比较]

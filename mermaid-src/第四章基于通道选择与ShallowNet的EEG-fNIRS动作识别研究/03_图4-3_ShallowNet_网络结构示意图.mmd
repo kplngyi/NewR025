@@ -1,0 +1,26 @@
+%%{
+  init: {
+    'theme': 'base',
+    'themeVariables': {
+      'fontFamily': 'SimSun, Times New Roman',
+      'fontSize': '32px',
+      'primaryColor': '#fff',
+      'primaryBorderColor': '#333',
+      'lineColor': '#444',
+      'nodeSpacing': 60,
+      'rankSpacing': 80
+    }
+  }
+}%%
+flowchart LR
+    A[多通道时间窗
+输入] --> B[浅层卷积
+特征提取]
+    B --> C[时域特征
+学习]
+    C --> D[跨通道空间
+模式聚合]
+    D --> E[判别特征
+表示]
+    E --> F[全连接
+分类输出]

@@ -1,0 +1,25 @@
+%%{
+  init: {
+    'theme': 'base',
+    'themeVariables': {
+      'fontFamily': 'SimSun, Times New Roman',
+      'fontSize': '32px',
+      'primaryColor': '#fff',
+      'primaryBorderColor': '#333',
+      'lineColor': '#444',
+      'nodeSpacing': 60,
+      'rankSpacing': 80
+    }
+  }
+}%%
+flowchart LR
+    A[窗口样本] --> B[通道排序]
+    B --> C[Top-K 通道
+筛选]
+    C --> D1[优选 EEG
+通道子集]
+    C --> D2[优选 fNIRS
+通道子集]
+    D1 --> E[单模态输入
+张量]
+    D2 --> E
