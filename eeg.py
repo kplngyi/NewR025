@@ -36,8 +36,8 @@ from runtime_utils import (
 )
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--batch_size", type=int, default=32)
-parser.add_argument("--epochs", type=int, default=300)
+parser.add_argument("--batch_size", type=int, default=None)
+parser.add_argument("--epochs", type=int, default=None)
 parser.add_argument("--data_dir", type=str, default="PPEEG")
 parser.add_argument("--device", type=str, default="auto")
 parser.add_argument(

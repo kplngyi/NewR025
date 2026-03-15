@@ -33,8 +33,8 @@ from runtime_utils import (
 )
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--batch_size", type=int, default=64)
-parser.add_argument("--epochs", type=int, default=30)
+parser.add_argument("--batch_size", type=int, default=None)
+parser.add_argument("--epochs", type=int, default=None)
 parser.add_argument("--data_dir", type=str, default="PPfNIRS")
 parser.add_argument(
     "--model", type=str, default="shallow", choices=["shallow", "temporal_se"]
