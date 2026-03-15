@@ -134,6 +134,14 @@ class TrackingWeightedRandomSampler(torch.utils.data.WeightedRandomSampler):
 
 
 class SampledClassRatioLogger:
+    def get_params(self, deep=True):
+        return {}
+
+    def set_params(self, **params):
+        for key, value in params.items():
+            setattr(self, key, value)
+        return self
+
     def on_epoch_end(self, net, dataset_train=None, dataset_valid=None, **kwargs):
         sampler = getattr(net, "iterator_train__sampler", None)
         if sampler is None:
