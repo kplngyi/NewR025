@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from skorch.callbacks import Callback
 
 
 def parse_known_args(parser):
@@ -133,18 +134,7 @@ class TrackingWeightedRandomSampler(torch.utils.data.WeightedRandomSampler):
         return iter(indices)
 
 
-class SampledClassRatioLogger:
-    def initialize(self):
-        return self
-
-    def get_params(self, deep=True):
-        return {}
-
-    def set_params(self, **params):
-        for key, value in params.items():
-            setattr(self, key, value)
-        return self
-
+class SampledClassRatioLogger(Callback):
     def on_epoch_end(self, net, dataset_train=None, dataset_valid=None, **kwargs):
         sampler = getattr(net, "iterator_train__sampler", None)
         if sampler is None:
