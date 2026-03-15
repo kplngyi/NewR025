@@ -36,6 +36,9 @@ ResfNIRS/
 # Timestamped experiment notes and reports
 20*.txt
 20*.md
+mermaid_figure_1.md
+mermaid-src/
+mermaid-png/
 
 # Notebooks
 *.ipynb
