@@ -1,14 +1,13 @@
-top_k: null
+top_k: 16
 window_size_samples: 200
 window_stride_samples: 100
 
-batch_size: 32
-n_epochs: 100
-# lr: 0.000625
-lr: 0.000625
+batch_size: 16
+n_epochs: 80
+lr: 0.0003
 weight_decay: 0.001
 seed: 20250713
-early_stop_patience: 20
+early_stop_patience: 12
 early_stop_monitor: valid_f1_macro
 early_stop_threshold: 0.001
 use_best_model: true

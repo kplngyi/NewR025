@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 import numpy as np
+import torch
 
 
 def parse_known_args(parser):
@@ -79,3 +80,70 @@ def normalize_channel_scores(scores):
     if score_max - score_min < 1e-12:
         return np.zeros_like(scores, dtype=float)
     return (scores - score_min) / (score_max - score_min)
+
+
+def create_balanced_sampler(targets):
+    targets = np.asarray(targets)
+    if targets.ndim != 1:
+        raise ValueError(f"Expected 1D targets, got shape {targets.shape}")
+    if targets.size == 0:
+        raise ValueError("Cannot create a sampler for an empty target array")
+
+    classes, counts = np.unique(targets, return_counts=True)
+    class_weight_map = {
+        cls: 1.0 / float(count) for cls, count in zip(classes.tolist(), counts.tolist())
+    }
+    sample_weights = np.asarray(
+        [class_weight_map[target] for target in targets.tolist()], dtype=np.float32
+    )
+    sampler = TrackingWeightedRandomSampler(
+        weights=sample_weights.astype(np.float64).tolist(),
+        num_samples=int(targets.size),
+        replacement=True,
+        targets=targets,
+    )
+    class_counts = {int(cls): int(count) for cls, count in zip(classes, counts)}
+    return sampler, class_counts
+
+
+class TrackingWeightedRandomSampler(torch.utils.data.WeightedRandomSampler):
+    def __init__(self, weights, num_samples, replacement, targets):
+        super().__init__(
+            weights=weights, num_samples=num_samples, replacement=replacement
+        )
+        self.targets = np.asarray(targets)
+        self.last_indices = []
+        self.last_class_counts = {}
+        self.last_class_ratios = {}
+
+    def __iter__(self):
+        indices = list(super().__iter__())
+        self.last_indices = indices
+        sampled_targets = self.targets[np.asarray(indices, dtype=int)]
+        classes, counts = np.unique(sampled_targets, return_counts=True)
+        total = max(1, int(sampled_targets.size))
+        self.last_class_counts = {
+            int(cls): int(count)
+            for cls, count in zip(classes.tolist(), counts.tolist())
+        }
+        self.last_class_ratios = {
+            int(cls): float(count) / float(total)
+            for cls, count in zip(classes.tolist(), counts.tolist())
+        }
+        return iter(indices)
+
+
+class SampledClassRatioLogger:
+    def on_epoch_end(self, net, dataset_train=None, dataset_valid=None, **kwargs):
+        sampler = getattr(net, "iterator_train__sampler", None)
+        if sampler is None:
+            return
+        class_counts = getattr(sampler, "last_class_counts", None)
+        class_ratios = getattr(sampler, "last_class_ratios", None)
+        if not class_counts or not class_ratios:
+            return
+        ratio_text = ", ".join(
+            f"class {cls}: count={class_counts[cls]}, ratio={class_ratios[cls]:.3f}"
+            for cls in sorted(class_counts)
+        )
+        print(f"Sampled train distribution this epoch -> {ratio_text}")

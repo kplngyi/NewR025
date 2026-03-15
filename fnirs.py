@@ -16,7 +16,12 @@ from braindecode import EEGClassifier
 from braindecode.datasets import create_from_mne_raw
 from braindecode.util import set_random_seeds
 from model_factory import build_model
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+from sklearn.metrics import (
+    balanced_accuracy_score,
+    confusion_matrix,
+    ConfusionMatrixDisplay,
+    f1_score,
+)
 from sklearn.model_selection import KFold, train_test_split
 from sklearn.utils import compute_class_weight
 from skorch.callbacks import EarlyStopping, EpochScoring, LRScheduler
@@ -24,12 +29,14 @@ from skorch.dataset import Dataset as SkorchDataset
 from skorch.helper import predefined_split
 from runtime_utils import (
     add_common_runtime_args,
+    create_balanced_sampler,
     normalize_channel_scores,
     parse_known_args,
     prepare_runtime_dirs,
     resolve_requested_top_k,
     resolve_path,
     resolve_project_root,
+    SampledClassRatioLogger,
 )
 
 parser = argparse.ArgumentParser()
@@ -306,6 +313,30 @@ def monitor_lower_is_better(monitor_name):
     }:
         return False
     raise ValueError(f"Unsupported early_stop_monitor: {monitor_name}")
+
+
+def save_cv_summary_files(summary_df, save_dir, prefix):
+    if summary_df.empty:
+        return
+
+    metric_columns = [
+        "test_acc",
+        "test_f1_macro",
+        "test_balanced_accuracy",
+    ]
+    for group_name, output_name in [
+        (["subject", "file"], f"{prefix}_per_file_cv_summary.csv"),
+        (["subject"], f"{prefix}_per_subject_cv_summary.csv"),
+    ]:
+        if not all(column in summary_df.columns for column in group_name):
+            continue
+        grouped = summary_df.groupby(group_name, dropna=False)
+        aggregated = grouped[metric_columns].agg(["mean", "std", "min", "max"])
+        aggregated.columns = ["_".join(col).strip("_") for col in aggregated.columns]
+        aggregated = aggregated.reset_index()
+        aggregated["n_splits"] = grouped.size().values
+        aggregated.to_csv(os.path.join(save_dir, output_name), index=False)
+        print("Saved CV summary CSV:", os.path.join(save_dir, output_name))
 
 
 # ------------------ 用户配置区（请根据需要修改） ------------------
@@ -668,10 +699,14 @@ while top_k >= MIN_TOP_K:
                     )
                     class_weights = torch.FloatTensor(class_weights).to(device)
                     criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
+                    train_sampler, train_class_counts = create_balanced_sampler(y_train)
+                    print(f"Training class counts: {train_class_counts}")
+                    print("Training sampler: class-balanced WeightedRandomSampler")
 
                     valid_ds = SkorchDataset(X_valid, y_valid)
                     callbacks = [
                         "accuracy",
+                        ("sampled_class_ratio", SampledClassRatioLogger()),
                         (
                             "valid_f1_macro",
                             EpochScoring(
@@ -722,6 +757,8 @@ while top_k >= MIN_TOP_K:
                         device=device,
                         classes=classes,
                         max_epochs=n_epochs,
+                        iterator_train__sampler=train_sampler,
+                        iterator_train__shuffle=False,
                     )
 
                     print("Start training...")
@@ -735,7 +772,13 @@ while top_k >= MIN_TOP_K:
 
                     y_pred_test = clf.predict(X_test)
                     test_acc = clf.score(X_test, y=y_test)
+                    test_f1_macro = f1_score(y_test, y_pred_test, average="macro")
+                    test_balanced_accuracy = balanced_accuracy_score(
+                        y_test, y_pred_test
+                    )
                     print(f"Test acc: {(test_acc * 100):.2f}%")
+                    print(f"Test f1_macro: {test_f1_macro:.4f}")
+                    print(f"Test balanced_accuracy: {test_balanced_accuracy:.4f}")
 
                     labels_for_cm = clf.classes_
                     cm_test = confusion_matrix(
@@ -778,6 +821,8 @@ while top_k >= MIN_TOP_K:
                         "n_valid": int(X_valid.shape[0]),
                         "n_test": int(X_test.shape[0]),
                         "test_acc": float(test_acc),
+                        "test_f1_macro": float(test_f1_macro),
+                        "test_balanced_accuracy": float(test_balanced_accuracy),
                         "selected_channel_idx": selected_channels,
                         "selected_channel_scores": [
                             float(s) for s in channel_scores[selected_channels]
@@ -836,4 +881,9 @@ while top_k >= MIN_TOP_K:
     )
     summary_df.to_csv(summary_csv, index=False)
     print("Saved summary CSV:", summary_csv)
+    save_cv_summary_files(
+        summary_df,
+        save_dir,
+        f"summary_{n_epochs}_{batch_size}_{top_k}",
+    )
     top_k = top_k - TOP_K_STEP
