@@ -204,10 +204,10 @@ def build_trial_records(
                 description=list(EVENT_LABELS),
             )
         )
-        trial_raw.plot(
-            scalings="auto", show=False
-        )  # Optional: visualize trial for sanity check
-        trial_raw.save(f"trial_plots/trial_{trial_id}.fif", overwrite=True)
+        # trial_raw.plot(
+        #     scalings="auto", show=False
+        # )  # Optional: visualize trial for sanity check
+        # trial_raw.save(f"trial_plots/trial_{trial_id}.fif", overwrite=True)
         trial_records.append(
             {
                 "trial_id": trial_id,
