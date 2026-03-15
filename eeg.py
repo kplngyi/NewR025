@@ -21,9 +21,9 @@ from fe_u import (
 )
 from model_factory import build_model
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import KFold, train_test_split
 from sklearn.utils import compute_class_weight
-from skorch.callbacks import EarlyStopping, LRScheduler
+from skorch.callbacks import Checkpoint, EarlyStopping, LRScheduler
 from skorch.helper import predefined_split
 from runtime_utils import (
     add_common_runtime_args,
@@ -50,7 +50,7 @@ parser.add_argument(
     "--bandpower_mode", type=str, default="avg", choices=["alpha", "beta", "avg"]
 )
 parser.add_argument("--top_k", type=int, default=None)
-parser.add_argument("--early_stopping_patience", type=int, default=15)
+parser.add_argument("--early_stopping_patience", type=int, default=None)
 args = parse_known_args(add_common_runtime_args(parser))
 
 # 切换到项目根目录，兼容本地脚本和 Colab 工作目录
@@ -204,7 +204,9 @@ def build_trial_records(
                 description=list(EVENT_LABELS),
             )
         )
-        trial_raw.plot(scalings="auto", show=False)  # Optional: visualize trial for sanity check
+        trial_raw.plot(
+            scalings="auto", show=False
+        )  # Optional: visualize trial for sanity check
         trial_raw.save(f"trial_plots/trial_{trial_id}.fif", overwrite=True)
         trial_records.append(
             {
@@ -235,6 +237,59 @@ def split_trial_records(trial_records, random_state=710):
         [trial_records[i] for i in valid_idx],
         [trial_records[i] for i in test_idx],
     )
+
+
+def build_trial_splits(
+    trial_records, use_cross_validation=False, cv_folds=5, random_state=710
+):
+    if not use_cross_validation:
+        train_trials, valid_trials, test_trials = split_trial_records(
+            trial_records, random_state=random_state
+        )
+        return [
+            {
+                "split_name": "holdout",
+                "fold_id": None,
+                "train_trials": train_trials,
+                "valid_trials": valid_trials,
+                "test_trials": test_trials,
+            }
+        ]
+
+    if cv_folds < 3:
+        raise ValueError(f"cv_folds must be at least 3, got {cv_folds}")
+    if len(trial_records) < cv_folds:
+        raise ValueError(
+            f"Need at least {cv_folds} trials for {cv_folds}-fold cross-validation, got {len(trial_records)}"
+        )
+
+    indices = np.arange(len(trial_records))
+    kfold = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+    fold_indices = [indices[test_idx] for _, test_idx in kfold.split(indices)]
+    split_defs = []
+
+    for fold_idx in range(cv_folds):
+        test_idx = fold_indices[fold_idx]
+        valid_idx = fold_indices[(fold_idx + 1) % cv_folds]
+        train_parts = [
+            fold_indices[i]
+            for i in range(cv_folds)
+            if i not in {fold_idx, (fold_idx + 1) % cv_folds}
+        ]
+        train_idx = (
+            np.concatenate(train_parts) if train_parts else np.array([], dtype=int)
+        )
+        split_defs.append(
+            {
+                "split_name": f"fold{fold_idx + 1}",
+                "fold_id": int(fold_idx + 1),
+                "train_trials": [trial_records[i] for i in train_idx],
+                "valid_trials": [trial_records[i] for i in valid_idx],
+                "test_trials": [trial_records[i] for i in test_idx],
+            }
+        )
+
+    return split_defs
 
 
 def create_windows_dataset_from_trials(
@@ -309,6 +364,17 @@ n_epochs = args.epochs if args.epochs is not None else config["n_epochs"]
 lr = config["lr"]
 weight_decay = config["weight_decay"]
 seed = config["seed"]
+early_stopping_patience = (
+    args.early_stopping_patience
+    if args.early_stopping_patience is not None
+    else int(config.get("early_stop_patience", 15))
+)
+early_stopping_monitor = str(config.get("early_stop_monitor", "valid_loss"))
+early_stopping_threshold = float(config.get("early_stop_threshold", 1e-4))
+early_stopping_lower_is_better = "loss" in early_stopping_monitor.lower()
+use_best_model = bool(config.get("use_best_model", False))
+use_cross_validation = bool(config.get("use_cross_validation", False))
+cv_folds = int(config.get("cv_folds", 5))
 fisher_method_tag = get_fisher_method_tag(args.fisher_method, args.bandpower_mode)
 
 # ------------------ 主循环 ------------------
@@ -336,7 +402,13 @@ while top_k >= MIN_TOP_K:
     print(f"批大小: {batch_size}")
     print(f"训练轮数: {n_epochs}")
     print(f"模型: {args.model}")
-    print(f"Early stopping patience: {args.early_stopping_patience}")
+    print(f"Early stopping patience: {early_stopping_patience}")
+    print(f"Early stopping monitor: {early_stopping_monitor}")
+    print(f"Early stopping threshold: {early_stopping_threshold}")
+    print(f"Use best model: {use_best_model}")
+    print(f"Use cross validation: {use_cross_validation}")
+    if use_cross_validation:
+        print(f"Cross-validation folds: {cv_folds}")
     print(f"模态最大通道数: {MAX_CHANNELS}")
     print(f"最小搜索通道数: {MIN_TOP_K}")
     print(f"通道搜索步长: {TOP_K_STEP}")
@@ -389,306 +461,321 @@ while top_k >= MIN_TOP_K:
                 continue
 
             try:
-                train_trials, valid_trials, test_trials = split_trial_records(
-                    trial_records, random_state=710
+                split_definitions = build_trial_splits(
+                    trial_records,
+                    use_cross_validation=use_cross_validation,
+                    cv_folds=cv_folds,
+                    random_state=seed,
                 )
             except ValueError as exc:
                 print(f"Trial split failed: {exc}")
                 continue
 
-            print(
-                "Trial split sizes:",
-                len(train_trials),
-                len(valid_trials),
-                len(test_trials),
-            )
+            for split_def in split_definitions:
+                split_name = split_def["split_name"]
+                fold_id = split_def["fold_id"]
+                fold_suffix = "" if fold_id is None else f"_fold{fold_id:02d}"
+                train_trials = split_def["train_trials"]
+                valid_trials = split_def["valid_trials"]
+                test_trials = split_def["test_trials"]
 
-            windows_dataset = create_windows_dataset_from_trials(
-                trial_records,
-                subject_id=subject_id,
-                window_size_samples=window_size_samples,
-                window_stride_samples=window_stride_samples,
-            )
-            print("Created full windows_dataset, length:", len(windows_dataset))
-            if len(windows_dataset) == 0:
-                print("No windows created from retained trials, skipping file.")
-                continue
+                print(f"Running split: {split_name}")
+                print(
+                    "Trial split sizes:",
+                    len(train_trials),
+                    len(valid_trials),
+                    len(test_trials),
+                )
 
-            if args.fisher_method == "bandpower":
-                fs = float(raw.info["sfreq"])
-                rank_idx, channel_scores, channel_scores_norm = (
-                    fisher_score_channels_alpha_beta_from_windows_dataset(
-                        windows_dataset,
-                        fs=fs,
-                        mode=args.bandpower_mode,
+                train_windows_dataset = create_windows_dataset_from_trials(
+                    train_trials,
+                    subject_id=subject_id,
+                    window_size_samples=window_size_samples,
+                    window_stride_samples=window_stride_samples,
+                )
+                valid_windows_dataset = create_windows_dataset_from_trials(
+                    valid_trials,
+                    subject_id=subject_id,
+                    window_size_samples=window_size_samples,
+                    window_stride_samples=window_stride_samples,
+                )
+                test_windows_dataset = create_windows_dataset_from_trials(
+                    test_trials,
+                    subject_id=subject_id,
+                    window_size_samples=window_size_samples,
+                    window_stride_samples=window_stride_samples,
+                )
+
+                if args.fisher_method == "bandpower":
+                    fs = float(raw.info["sfreq"])
+                    rank_idx, channel_scores, channel_scores_norm = (
+                        fisher_score_channels_alpha_beta_from_windows_dataset(
+                            train_windows_dataset,
+                            fs=fs,
+                            mode=args.bandpower_mode,
+                        )
                     )
+                else:
+                    rank_idx, channel_scores, channel_scores_norm, _ = (
+                        fisher_score_channels_from_windows_dataset_tdpsd(
+                            train_windows_dataset
+                        )
+                    )
+
+                n_channels_total = np.array(train_windows_dataset[0][0]).shape[0]
+                top_k_use = min(top_k, n_channels_total)
+                selected_channels = list(rank_idx[:top_k_use])
+                print(
+                    f"Total channels: {n_channels_total}, selecting top_k = {top_k_use}"
                 )
-            else:
-                rank_idx, channel_scores, channel_scores_norm, _ = (
-                    fisher_score_channels_from_windows_dataset_tdpsd(windows_dataset)
+                print(f"Channel selection fisher method: {fisher_method_tag}")
+                print("Selected channel indices:", selected_channels)
+                print("Selected channel scores:", channel_scores[selected_channels])
+                print(
+                    "Selected normalized channel scores:",
+                    channel_scores_norm[selected_channels],
                 )
 
-            n_channels_total = np.array(windows_dataset[0][0]).shape[0]
-            top_k_use = min(top_k, n_channels_total)
-            selected_channels = list(rank_idx[:top_k_use])
-            print(f"Total channels: {n_channels_total}, selecting top_k = {top_k_use}")
-            print(f"Channel selection fisher method: {fisher_method_tag}")
-            print("Selected channel indices:", selected_channels)
-            print("Selected channel scores:", channel_scores[selected_channels])
-            print(
-                "Selected normalized channel scores:",
-                channel_scores_norm[selected_channels],
-            )
+                if (
+                    min(
+                        len(train_windows_dataset),
+                        len(valid_windows_dataset),
+                        len(test_windows_dataset),
+                    )
+                    == 0
+                ):
+                    print(
+                        "One of the split datasets produced no windows, skipping split."
+                    )
+                    continue
 
-            train_windows_dataset = create_windows_dataset_from_trials(
-                train_trials,
-                subject_id=subject_id,
-                window_size_samples=window_size_samples,
-                window_stride_samples=window_stride_samples,
-            )
-            valid_windows_dataset = create_windows_dataset_from_trials(
-                valid_trials,
-                subject_id=subject_id,
-                window_size_samples=window_size_samples,
-                window_stride_samples=window_stride_samples,
-            )
-            test_windows_dataset = create_windows_dataset_from_trials(
-                test_trials,
-                subject_id=subject_id,
-                window_size_samples=window_size_samples,
-                window_stride_samples=window_stride_samples,
-            )
-
-            if (
-                min(
-                    len(train_windows_dataset),
-                    len(valid_windows_dataset),
-                    len(test_windows_dataset),
+                train_set = select_windows_with_channels(
+                    train_windows_dataset, selected_channels
                 )
-                == 0
-            ):
-                print("One of the split datasets produced no windows, skipping file.")
-                continue
+                valid_set = select_windows_with_channels(
+                    valid_windows_dataset, selected_channels
+                )
+                test_set = select_windows_with_channels(
+                    test_windows_dataset, selected_channels
+                )
 
-            train_set = select_windows_with_channels(
-                train_windows_dataset, selected_channels
-            )
-            valid_set = select_windows_with_channels(
-                valid_windows_dataset, selected_channels
-            )
-            test_set = select_windows_with_channels(
-                test_windows_dataset, selected_channels
-            )
+                def extract_X_y_from_sample_list(sample_list):
+                    X_list = []
+                    y_list = []
+                    for X, y, _ in sample_list:
+                        X_list.append(np.array(X))
+                        y_list.append(y)
+                    X_all = np.stack(X_list)
+                    y_all = np.array(y_list)
+                    return X_all, y_all
 
-            def extract_X_y_from_sample_list(sample_list):
-                X_list = []
-                y_list = []
-                for X, y, _ in sample_list:
-                    X_list.append(np.array(X))
-                    y_list.append(y)
-                X_all = np.stack(X_list)  # (n_trials, n_ch_sel, n_time)
-                y_all = np.array(y_list)
-                return X_all, y_all
+                X_train, y_train = extract_X_y_from_sample_list(train_set)
+                X_valid, y_valid = extract_X_y_from_sample_list(valid_set)
+                X_test, y_test = extract_X_y_from_sample_list(test_set)
 
-            X_train, y_train = extract_X_y_from_sample_list(train_set)
-            X_valid, y_valid = extract_X_y_from_sample_list(valid_set)
-            X_test, y_test = extract_X_y_from_sample_list(test_set)
+                print(
+                    "Train/Valid/Test sizes:",
+                    X_train.shape[0],
+                    X_valid.shape[0],
+                    X_test.shape[0],
+                )
+                print(
+                    "Shapes (n_trials, n_ch_sel, n_time):",
+                    X_train.shape,
+                    X_valid.shape,
+                    X_test.shape,
+                )
+                print("Selected channel count used for training:", X_train.shape[1])
 
-            print(
-                "Train/Valid/Test sizes:",
-                X_train.shape[0],
-                X_valid.shape[0],
-                X_test.shape[0],
-            )
-            print(
-                "Shapes (n_trials, n_ch_sel, n_time):",
-                X_train.shape,
-                X_valid.shape,
-                X_test.shape,
-            )
-            print("Selected channel count used for training:", X_train.shape[1])
+                train_device = resolve_training_device(args.device)
+                use_cuda = train_device.type == "cuda"
+                if use_cuda:
+                    torch.backends.cudnn.benchmark = True
+                set_random_seeds(seed=seed, cuda=use_cuda)
+                print(f"Requested device: {args.device}")
+                print(f"Resolved device: {train_device}")
+                print(f"CUDA available: {torch.cuda.is_available()}")
+                if use_cuda:
+                    print(f"CUDA device count: {torch.cuda.device_count()}")
+                    print(f"Using GPU: {torch.cuda.get_device_name(train_device)}")
 
-            # ------------------ 设置随机种子与设备 ------------------
-            train_device = resolve_training_device(args.device)
-            use_cuda = train_device.type == "cuda"
-            if use_cuda:
-                torch.backends.cudnn.benchmark = True
-            set_random_seeds(seed=seed, cuda=use_cuda)
-            print(f"Requested device: {args.device}")
-            print(f"Resolved device: {train_device}")
-            print(f"CUDA available: {torch.cuda.is_available()}")
-            if use_cuda:
-                print(f"CUDA device count: {torch.cuda.device_count()}")
-                print(f"Using GPU: {torch.cuda.get_device_name(train_device)}")
+                n_channels = X_train.shape[1]
+                input_window_samples = X_train.shape[2]
+                classes = np.unique(y_train)
+                n_classes = len(classes)
 
-            # ------------------ 构建模型（注意 n_channels 来自 selected channels） ------------------
-            n_channels = X_train.shape[1]
-            input_window_samples = X_train.shape[2]
-            classes = np.unique(y_train)
-            n_classes = len(classes)
+                model = build_model(
+                    model_name=args.model,
+                    n_channels=n_channels,
+                    n_classes=n_classes,
+                    n_times=input_window_samples,
+                )
+                print(f"Model: {args.model}")
+                print(model)
 
-            model = build_model(
-                model_name=args.model,
-                n_channels=n_channels,
-                n_classes=n_classes,
-                n_times=input_window_samples,
-            )
-            print(f"Model: {args.model}")
-            print(model)
+                class_weights = compute_class_weight(
+                    "balanced", classes=classes, y=y_train
+                )
+                class_weights = torch.FloatTensor(class_weights).to(train_device)
+                criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
 
-            # ------------------ 损失函数：根据训练集计算 class weights ------------------
-            class_weights = compute_class_weight("balanced", classes=classes, y=y_train)
-            class_weights = torch.FloatTensor(class_weights).to(train_device)
-            criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
-
-            callbacks = [
-                "accuracy",
-                (
-                    "lr_scheduler",
-                    LRScheduler("CosineAnnealingLR", T_max=max(1, n_epochs - 1)),
-                ),
-            ]
-            if args.early_stopping_patience > 0:
-                callbacks.append(
+                callbacks = [
+                    "accuracy",
                     (
-                        "early_stopping",
-                        EarlyStopping(
-                            monitor="valid_loss",
-                            patience=args.early_stopping_patience,
-                            lower_is_better=True,
-                        ),
+                        "lr_scheduler",
+                        LRScheduler("CosineAnnealingLR", T_max=max(1, n_epochs - 1)),
+                    ),
+                ]
+                if early_stopping_patience > 0:
+                    callbacks.append(
+                        (
+                            "early_stopping",
+                            EarlyStopping(
+                                monitor=early_stopping_monitor,
+                                patience=early_stopping_patience,
+                                threshold=early_stopping_threshold,
+                                lower_is_better=early_stopping_lower_is_better,
+                            ),
+                        )
+                    )
+                if use_best_model:
+                    callbacks.append(
+                        (
+                            "best_model_checkpoint",
+                            Checkpoint(
+                                monitor="valid_loss_best",
+                                load_best=True,
+                                dirname=save_dir,
+                                fn_prefix=(
+                                    f"{resname}{fold_suffix}_{fisher_method_tag}_{batch_size}_{n_epochs}_{top_k}_{lr}_best_"
+                                ),
+                            ),
+                        )
+                    )
+
+                clf = EEGClassifier(
+                    model,
+                    criterion=criterion,
+                    optimizer=torch.optim.AdamW,
+                    train_split=predefined_split(valid_set),
+                    optimizer__lr=lr,
+                    optimizer__weight_decay=weight_decay,
+                    batch_size=batch_size,
+                    callbacks=callbacks,
+                    device=str(train_device),
+                    classes=classes,
+                    max_epochs=n_epochs,
+                )
+
+                print("Start training...")
+                clf.fit(X_train, y=y_train)
+                print("Training finished.")
+                summarize_training_history(
+                    clf,
+                    max_epochs=n_epochs,
+                    early_stopping_patience=early_stopping_patience,
+                )
+
+                y_pred_test = clf.predict(X_test)
+                test_acc = clf.score(X_test, y=y_test)
+                print(f"Test acc: {(test_acc * 100):.2f}%")
+
+                labels_for_cm = clf.classes_
+                cm_test = confusion_matrix(y_test, y_pred_test, labels=labels_for_cm)
+
+                def plot_and_save(cm, labels, title, fname):
+                    disp = ConfusionMatrixDisplay(cm, display_labels=labels)
+                    fig, ax = plt.subplots(figsize=(4, 4))
+                    disp.plot(ax=ax, cmap="Blues", colorbar=False, values_format="d")
+                    ax.set_title(title)
+                    fig.tight_layout()
+                    fig.savefig(fname, dpi=300)
+                    plt.close(fig)
+                    print(f"Saved image: {fname}")
+
+                plot_and_save(
+                    cm_test,
+                    labels_for_cm,
+                    f"Confusion Matrix (Test) - {split_name}",
+                    os.path.join(
+                        save_dir,
+                        f"{resname}{fold_suffix}_{fisher_method_tag}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.png",
+                    ),
+                )
+                pd.DataFrame(
+                    cm_test, index=labels_for_cm, columns=labels_for_cm
+                ).to_csv(
+                    os.path.join(
+                        save_dir,
+                        f"{resname}{fold_suffix}_{fisher_method_tag}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.csv",
                     )
                 )
+                print("CSV 已保存到", save_dir)
 
-            # ------------------ 构建 EEGClassifier 并训练 ------------------
-            clf = EEGClassifier(
-                model,
-                criterion=criterion,
-                optimizer=torch.optim.AdamW,
-                train_split=predefined_split(valid_set),
-                optimizer__lr=lr,
-                optimizer__weight_decay=weight_decay,
-                batch_size=batch_size,
-                callbacks=callbacks,
-                device=str(train_device),
-                classes=classes,
-                max_epochs=n_epochs,
-            )
-
-            print("Start training...")
-            clf.fit(X_train, y=y_train)
-            print("Training finished.")
-            summarize_training_history(
-                clf,
-                max_epochs=n_epochs,
-                early_stopping_patience=args.early_stopping_patience,
-            )
-
-            # ------------------ 评估 ------------------
-            y_pred_test = clf.predict(X_test)
-            test_acc = clf.score(X_test, y=y_test)
-            print(f"Test acc: {(test_acc * 100):.2f}%")
-
-            labels_for_cm = clf.classes_
-            cm_test = confusion_matrix(y_test, y_pred_test, labels=labels_for_cm)
-
-            # ---------- 保存结果 ----------
-            def plot_and_save(cm, labels, title, fname):
-                disp = ConfusionMatrixDisplay(cm, display_labels=labels)
-                fig, ax = plt.subplots(figsize=(4, 4))
-                disp.plot(ax=ax, cmap="Blues", colorbar=False, values_format="d")
-                ax.set_title(title)
-                fig.tight_layout()
-                fig.savefig(fname, dpi=300)
-                plt.close(fig)
-                print(f"Saved image: {fname}")
-
-            plot_and_save(
-                cm_test,
-                labels_for_cm,
-                "Confusion Matrix (Test)",
-                os.path.join(
-                    save_dir,
-                    f"{resname}_{fisher_method_tag}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.png",
-                ),
-            )
-            pd.DataFrame(cm_test, index=labels_for_cm, columns=labels_for_cm).to_csv(
-                os.path.join(
-                    save_dir,
-                    f"{resname}_{fisher_method_tag}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.csv",
+                pd.DataFrame(
+                    {
+                        "selected_channel_idx": selected_channels,
+                        "score": channel_scores[selected_channels],
+                        "score_norm": channel_scores_norm[selected_channels],
+                        "fisher_method": fisher_method_tag,
+                        "split_name": split_name,
+                    }
+                ).to_csv(
+                    os.path.join(
+                        save_dir,
+                        f"{resname}{fold_suffix}_{fisher_method_tag}_{top_k}_selected_channels.csv",
+                    ),
+                    index=False,
                 )
-            )
-            print("CSV 已保存到", save_dir)
+                print("Selected channels saved.")
 
-            # 记录所选通道到文件，便于审查
-            pd.DataFrame(
-                {
-                    "selected_channel_idx": selected_channels,
-                    "score": channel_scores[selected_channels],
-                    "score_norm": channel_scores_norm[selected_channels],
-                    "fisher_method": fisher_method_tag,
-                }
-            ).to_csv(
-                os.path.join(
-                    save_dir,
-                    f"{resname}_{fisher_method_tag}_{top_k}_selected_channels.csv",
-                ),
-                index=False,
-            )
-            print("Selected channels saved.")
-
-            # ---------- 将结果记录到 global_results（用于后续比较） ----------
-            try:
-                ch_names = raw.info.get("ch_names", None)
-                selected_channel_names = (
-                    [ch_names[i] for i in selected_channels]
-                    if ch_names is not None
-                    else []
-                )
-            except Exception:
-                selected_channel_names = []
-
-            result_entry = {
-                "subject": subject_id,
-                "file": resname,
-                "top_k": int(top_k_use),
-                "n_channels_total": int(n_channels_total),
-                "n_channels_selected": int(len(selected_channels)),
-                "n_train": int(X_train.shape[0]),
-                "n_valid": int(X_valid.shape[0]),
-                "n_test": int(X_test.shape[0]),
-                "test_acc": float(test_acc),
-                "fisher_method": fisher_method_tag,
-                "selected_channel_idx": selected_channels,
-                "selected_channel_scores": [
-                    float(s) for s in channel_scores[selected_channels]
-                ],
-                "selected_channel_scores_norm": [
-                    float(s) for s in channel_scores_norm[selected_channels]
-                ],
-                "all_channel_scores": [float(s) for s in channel_scores],
-                "all_channel_scores_norm": [float(s) for s in channel_scores_norm],
-                "selected_channel_names": selected_channel_names,
-            }
-            global_results.append(result_entry)
-
-            # ------------------ 清理释放内存 / GPU ------------------
-            del clf, model
-            del X_train, y_train, X_valid, y_valid, X_test, y_test
-            del train_set, valid_set, test_set
-            del (
-                train_windows_dataset,
-                valid_windows_dataset,
-                test_windows_dataset,
-                windows_dataset,
-            )
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
                 try:
-                    torch.cuda.ipc_collect()
+                    ch_names = raw.info.get("ch_names", None)
+                    selected_channel_names = (
+                        [ch_names[i] for i in selected_channels]
+                        if ch_names is not None
+                        else []
+                    )
                 except Exception:
-                    pass
-            gc.collect()
+                    selected_channel_names = []
+
+                result_entry = {
+                    "subject": subject_id,
+                    "file": resname,
+                    "split_name": split_name,
+                    "fold_id": fold_id,
+                    "top_k": int(top_k_use),
+                    "n_channels_total": int(n_channels_total),
+                    "n_channels_selected": int(len(selected_channels)),
+                    "n_train": int(X_train.shape[0]),
+                    "n_valid": int(X_valid.shape[0]),
+                    "n_test": int(X_test.shape[0]),
+                    "test_acc": float(test_acc),
+                    "fisher_method": fisher_method_tag,
+                    "selected_channel_idx": selected_channels,
+                    "selected_channel_scores": [
+                        float(s) for s in channel_scores[selected_channels]
+                    ],
+                    "selected_channel_scores_norm": [
+                        float(s) for s in channel_scores_norm[selected_channels]
+                    ],
+                    "all_channel_scores": [float(s) for s in channel_scores],
+                    "all_channel_scores_norm": [float(s) for s in channel_scores_norm],
+                    "selected_channel_names": selected_channel_names,
+                }
+                global_results.append(result_entry)
+
+                del clf, model
+                del X_train, y_train, X_valid, y_valid, X_test, y_test
+                del train_set, valid_set, test_set
+                del train_windows_dataset, valid_windows_dataset, test_windows_dataset
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    try:
+                        torch.cuda.ipc_collect()
+                    except Exception:
+                        pass
+                gc.collect()
 
     finally:
         sys.stdout = orig_stdout

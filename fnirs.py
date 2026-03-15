@@ -17,7 +17,7 @@ from braindecode.datasets import create_from_mne_raw
 from braindecode.util import set_random_seeds
 from model_factory import build_model
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import KFold, train_test_split
 from sklearn.utils import compute_class_weight
 from skorch.callbacks import EarlyStopping, LRScheduler
 from skorch.dataset import Dataset as SkorchDataset
@@ -40,7 +40,7 @@ parser.add_argument(
     "--model", type=str, default="shallow", choices=["shallow", "temporal_se"]
 )
 parser.add_argument("--top_k", type=int, default=None)
-parser.add_argument("--early_stopping_patience", type=int, default=15)
+parser.add_argument("--early_stopping_patience", type=int, default=None)
 args = parse_known_args(add_common_runtime_args(parser))
 
 cwd = os.getcwd()
@@ -154,6 +154,57 @@ def split_trial_records(trial_records, random_state=710):
     )
 
 
+def build_trial_splits(
+    trial_records, use_cross_validation=False, cv_folds=5, random_state=710
+):
+    if not use_cross_validation:
+        train_trials, valid_trials, test_trials = split_trial_records(
+            trial_records, random_state=random_state
+        )
+        return [
+            {
+                "split_name": "holdout",
+                "fold_id": None,
+                "train_trials": train_trials,
+                "valid_trials": valid_trials,
+                "test_trials": test_trials,
+            }
+        ]
+
+    if cv_folds < 3:
+        raise ValueError(f"cv_folds must be at least 3, got {cv_folds}")
+    if len(trial_records) < cv_folds:
+        raise ValueError(
+            f"Need at least {cv_folds} trials for {cv_folds}-fold cross-validation, got {len(trial_records)}"
+        )
+
+    indices = np.arange(len(trial_records))
+    kfold = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+    fold_indices = [indices[test_idx] for _, test_idx in kfold.split(indices)]
+    split_defs = []
+    for fold_idx in range(cv_folds):
+        test_idx = fold_indices[fold_idx]
+        valid_idx = fold_indices[(fold_idx + 1) % cv_folds]
+        train_parts = [
+            fold_indices[i]
+            for i in range(cv_folds)
+            if i not in {fold_idx, (fold_idx + 1) % cv_folds}
+        ]
+        train_idx = (
+            np.concatenate(train_parts) if train_parts else np.array([], dtype=int)
+        )
+        split_defs.append(
+            {
+                "split_name": f"fold{fold_idx + 1}",
+                "fold_id": int(fold_idx + 1),
+                "train_trials": [trial_records[i] for i in train_idx],
+                "valid_trials": [trial_records[i] for i in valid_idx],
+                "test_trials": [trial_records[i] for i in test_idx],
+            }
+        )
+    return split_defs
+
+
 def create_windows_dataset_from_trials(
     trial_records, subject_id, window_size_samples, window_stride_samples
 ):
@@ -257,6 +308,16 @@ n_epochs = args.epochs if args.epochs is not None else config["n_epochs"]
 lr = config["lr"]
 weight_decay = config["weight_decay"]
 seed = config["seed"]
+early_stopping_patience = (
+    args.early_stopping_patience
+    if args.early_stopping_patience is not None
+    else int(config.get("early_stop_patience", 15))
+)
+early_stopping_monitor = str(config.get("early_stop_monitor", "valid_loss"))
+early_stopping_threshold = float(config.get("early_stop_threshold", 1e-4))
+early_stopping_lower_is_better = "loss" in early_stopping_monitor.lower()
+use_cross_validation = bool(config.get("use_cross_validation", False))
+cv_folds = int(config.get("cv_folds", 5))
 
 # 保存目录
 save_dir = runtime_dirs["output_dir"] / "ResfNIRS"
@@ -350,7 +411,12 @@ while top_k >= MIN_TOP_K:
     print(f"批大小: {batch_size}")
     print(f"训练轮数: {n_epochs}")
     print(f"模型: {args.model}")
-    print(f"Early stopping patience: {args.early_stopping_patience}")
+    print(f"Early stopping patience: {early_stopping_patience}")
+    print(f"Early stopping monitor: {early_stopping_monitor}")
+    print(f"Early stopping threshold: {early_stopping_threshold}")
+    print(f"Use cross validation: {use_cross_validation}")
+    if use_cross_validation:
+        print(f"Cross-validation folds: {cv_folds}")
     print(f"模态最大通道数: {MAX_CHANNELS}")
     print(f"最小搜索通道数: {MIN_TOP_K}")
     print(f"通道搜索步长: {TOP_K_STEP}")
@@ -411,282 +477,288 @@ while top_k >= MIN_TOP_K:
                     )
                     continue
 
-                train_trials, valid_trials, test_trials = split_trial_records(
-                    trial_records, random_state=710
-                )
-                print(
-                    "Trial split sizes:",
-                    len(train_trials),
-                    len(valid_trials),
-                    len(test_trials),
-                )
-
-                windows_dataset = create_windows_dataset_from_trials(
+                split_definitions = build_trial_splits(
                     trial_records,
-                    subject_id=subject_id,
-                    window_size_samples=window_size_samples,
-                    window_stride_samples=window_stride_samples,
+                    use_cross_validation=use_cross_validation,
+                    cv_folds=cv_folds,
+                    random_state=seed,
                 )
 
-                print("Created full windows_dataset, length:", len(windows_dataset))
-                if len(windows_dataset) == 0:
-                    print("No windows created from retained trials. Skipping file.")
-                    continue
+                for split_def in split_definitions:
+                    split_name = split_def["split_name"]
+                    fold_id = split_def["fold_id"]
+                    fold_suffix = "" if fold_id is None else f"_fold{fold_id:02d}"
+                    train_trials = split_def["train_trials"]
+                    valid_trials = split_def["valid_trials"]
+                    test_trials = split_def["test_trials"]
 
-                # ------------------ 通道选择（Fisher score） ------------------
-                rank_idx, channel_scores, channel_scores_norm = (
-                    fisher_score_channels_from_windows_dataset(windows_dataset)
-                )
-                n_channels_total = np.array(windows_dataset[0][0]).shape[0]
-                top_k_use = min(top_k, n_channels_total)
-                selected_channels = list(rank_idx[:top_k_use])
-                print(
-                    f"Total channels: {n_channels_total}, selecting top_k = {top_k_use}"
-                )
-                print("Selected channel indices:", selected_channels)
-                print("Selected channel scores:", channel_scores[selected_channels])
-                print(
-                    "Selected normalized channel scores:",
-                    channel_scores_norm[selected_channels],
-                )
-
-                # 保存所选通道名字（若 raw.info 有通道名）
-                try:
-                    ch_names = raw.info.get("ch_names", None)
-                    if ch_names is not None:
-                        selected_channel_names = [
-                            ch_names[i] for i in selected_channels
-                        ]
-                        pd.DataFrame(
-                            {
-                                "idx": selected_channels,
-                                "name": selected_channel_names,
-                                "score": channel_scores[selected_channels],
-                                "score_norm": channel_scores_norm[selected_channels],
-                            }
-                        ).to_csv(
-                            f"{save_dir}/{resname}_selected_channels.csv", index=False
-                        )
-                        print("Saved selected channel info to CSV.")
-                except Exception as e:
-                    print("Warning saving selected channel names:", e)
-
-                train_windows_dataset = create_windows_dataset_from_trials(
-                    train_trials,
-                    subject_id=subject_id,
-                    window_size_samples=window_size_samples,
-                    window_stride_samples=window_stride_samples,
-                )
-                valid_windows_dataset = create_windows_dataset_from_trials(
-                    valid_trials,
-                    subject_id=subject_id,
-                    window_size_samples=window_size_samples,
-                    window_stride_samples=window_stride_samples,
-                )
-                test_windows_dataset = create_windows_dataset_from_trials(
-                    test_trials,
-                    subject_id=subject_id,
-                    window_size_samples=window_size_samples,
-                    window_stride_samples=window_stride_samples,
-                )
-
-                if (
-                    min(
-                        len(train_windows_dataset),
-                        len(valid_windows_dataset),
-                        len(test_windows_dataset),
-                    )
-                    == 0
-                ):
+                    print(f"Running split: {split_name}")
                     print(
-                        "One of the split datasets produced no windows, skipping file."
+                        "Trial split sizes:",
+                        len(train_trials),
+                        len(valid_trials),
+                        len(test_trials),
                     )
-                    continue
 
-                train_set = select_windows_with_channels(
-                    train_windows_dataset, selected_channels
-                )
-                valid_set = select_windows_with_channels(
-                    valid_windows_dataset, selected_channels
-                )
-                test_set = select_windows_with_channels(
-                    test_windows_dataset, selected_channels
-                )
+                    train_windows_dataset = create_windows_dataset_from_trials(
+                        train_trials,
+                        subject_id=subject_id,
+                        window_size_samples=window_size_samples,
+                        window_stride_samples=window_stride_samples,
+                    )
+                    valid_windows_dataset = create_windows_dataset_from_trials(
+                        valid_trials,
+                        subject_id=subject_id,
+                        window_size_samples=window_size_samples,
+                        window_stride_samples=window_stride_samples,
+                    )
+                    test_windows_dataset = create_windows_dataset_from_trials(
+                        test_trials,
+                        subject_id=subject_id,
+                        window_size_samples=window_size_samples,
+                        window_stride_samples=window_stride_samples,
+                    )
 
-                X_train, y_train = extract_X_y_from_sample_list(train_set)
-                X_valid, y_valid = extract_X_y_from_sample_list(valid_set)
-                X_test, y_test = extract_X_y_from_sample_list(test_set)
+                    if (
+                        min(
+                            len(train_windows_dataset),
+                            len(valid_windows_dataset),
+                            len(test_windows_dataset),
+                        )
+                        == 0
+                    ):
+                        print(
+                            "One of the split datasets produced no windows, skipping split."
+                        )
+                        continue
 
-                print(
-                    "Train/Valid/Test sizes:",
-                    X_train.shape[0],
-                    X_valid.shape[0],
-                    X_test.shape[0],
-                )
-                print(
-                    "Shapes (n_trials, n_ch_sel, n_time):",
-                    X_train.shape,
-                    X_valid.shape,
-                    X_test.shape,
-                )
-                print("Selected channel count used for training:", X_train.shape[1])
-
-                # dtype 强制转换（skorch / torch 要求）
-                X_train = X_train.astype(np.float32)
-                X_valid = X_valid.astype(np.float32)
-                X_test = X_test.astype(np.float32)
-                y_train = y_train.astype(np.int64)
-                y_valid = y_valid.astype(np.int64)
-                y_test = y_test.astype(np.int64)
-
-                # ------------------ 随机种子与设备 ------------------
-                cuda = torch.cuda.is_available()
-                device = "cuda" if cuda else "cpu"
-                if cuda:
-                    torch.backends.cudnn.benchmark = False
-                set_random_seeds(seed=seed, cuda=cuda)
-
-                # ------------------ 构建模型 ------------------
-                n_channels = X_train.shape[1]
-                input_window_samples = X_train.shape[2]
-                classes = np.unique(y_train)
-                n_classes = len(classes)
-
-                model = build_model(
-                    model_name=args.model,
-                    n_channels=n_channels,
-                    n_classes=n_classes,
-                    n_times=input_window_samples,
-                )
-                print(f"Model: {args.model}")
-                print(model)
-                if cuda:
-                    model.cuda()
-
-                # ------------------ 损失函数与 class weights ------------------
-                class_weights = compute_class_weight(
-                    "balanced", classes=classes, y=y_train
-                )
-                class_weights = torch.FloatTensor(class_weights).to(device)
-                criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
-
-                # ------------------ 将 valid_set 转为 SkorchDataset 并构建 EEGClassifier ------------------
-                valid_ds = SkorchDataset(X_valid, y_valid)
-                callbacks = [
-                    "accuracy",
-                    (
-                        "lr_scheduler",
-                        LRScheduler("CosineAnnealingLR", T_max=max(1, n_epochs - 1)),
-                    ),
-                ]
-                if args.early_stopping_patience > 0:
-                    callbacks.append(
-                        (
-                            "early_stopping",
-                            EarlyStopping(
-                                monitor="valid_loss",
-                                patience=args.early_stopping_patience,
-                                lower_is_better=True,
-                            ),
+                    rank_idx, channel_scores, channel_scores_norm = (
+                        fisher_score_channels_from_windows_dataset(
+                            train_windows_dataset
                         )
                     )
-
-                clf = EEGClassifier(
-                    model,
-                    criterion=criterion,
-                    optimizer=torch.optim.AdamW,
-                    train_split=predefined_split(valid_ds),
-                    optimizer__lr=lr,
-                    optimizer__weight_decay=weight_decay,
-                    batch_size=batch_size,
-                    callbacks=callbacks,
-                    device=device,
-                    classes=classes,
-                    max_epochs=n_epochs,
-                )
-
-                print("Start training...")
-                clf.fit(X_train, y=y_train)
-                print("Training finished.")
-                summarize_training_history(
-                    clf,
-                    max_epochs=n_epochs,
-                    early_stopping_patience=args.early_stopping_patience,
-                )
-
-                # ---------- 评估 ----------
-                y_pred_test = clf.predict(X_test)
-                test_acc = clf.score(X_test, y=y_test)
-                print(f"Test acc: {(test_acc * 100):.2f}%")
-
-                labels_for_cm = clf.classes_
-                cm_test = confusion_matrix(y_test, y_pred_test, labels=labels_for_cm)
-
-                # ---------- 保存结果 ----------
-                plot_and_save(
-                    cm_test,
-                    labels_for_cm,
-                    "Confusion Matrix (Test)",
-                    f"{save_dir}/{resname}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.png",
-                )
-                pd.DataFrame(
-                    cm_test, index=labels_for_cm, columns=labels_for_cm
-                ).to_csv(
-                    f"{save_dir}/{resname}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.csv",
-                    index=True,
-                )
-                print("CSV 已保存到", save_dir)
-                # ---------- 将结果记录到 global_results（用于后续比较） ----------
-                try:
-                    ch_names = raw.info.get("ch_names", None)
-                    selected_channel_names = (
-                        [ch_names[i] for i in selected_channels]
-                        if ch_names is not None
-                        else []
+                    n_channels_total = np.array(train_windows_dataset[0][0]).shape[0]
+                    top_k_use = min(top_k, n_channels_total)
+                    selected_channels = list(rank_idx[:top_k_use])
+                    print(
+                        f"Total channels: {n_channels_total}, selecting top_k = {top_k_use}"
                     )
-                except Exception:
-                    selected_channel_names = []
+                    print("Selected channel indices:", selected_channels)
+                    print("Selected channel scores:", channel_scores[selected_channels])
+                    print(
+                        "Selected normalized channel scores:",
+                        channel_scores_norm[selected_channels],
+                    )
 
-                result_entry = {
-                    "subject": subject_id,
-                    "file": resname,
-                    "top_k": int(top_k_use),
-                    "n_channels_total": int(n_channels_total),
-                    "n_channels_selected": int(len(selected_channels)),
-                    "n_train": int(X_train.shape[0]),
-                    "n_valid": int(X_valid.shape[0]),
-                    "n_test": int(X_test.shape[0]),
-                    "test_acc": float(test_acc),
-                    "selected_channel_idx": selected_channels,
-                    "selected_channel_scores": [
-                        float(s) for s in channel_scores[selected_channels]
-                    ],
-                    "selected_channel_scores_norm": [
-                        float(s) for s in channel_scores_norm[selected_channels]
-                    ],
-                    "all_channel_scores": [float(s) for s in channel_scores],
-                    "all_channel_scores_norm": [float(s) for s in channel_scores_norm],
-                    "selected_channel_names": selected_channel_names,
-                }
-                global_results.append(result_entry)
-                # 清理释放内存 / GPU
-                del clf, model
-                del X_train, y_train, X_valid, y_valid, X_test, y_test
-                del train_set, valid_set, test_set
-                del (
-                    train_windows_dataset,
-                    valid_windows_dataset,
-                    test_windows_dataset,
-                    windows_dataset,
-                )
-                del rank_idx, channel_scores, selected_channels
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
                     try:
-                        torch.cuda.ipc_collect()
+                        ch_names = raw.info.get("ch_names", None)
+                        if ch_names is not None:
+                            selected_channel_names = [
+                                ch_names[i] for i in selected_channels
+                            ]
+                            pd.DataFrame(
+                                {
+                                    "idx": selected_channels,
+                                    "name": selected_channel_names,
+                                    "score": channel_scores[selected_channels],
+                                    "score_norm": channel_scores_norm[
+                                        selected_channels
+                                    ],
+                                    "split_name": split_name,
+                                }
+                            ).to_csv(
+                                f"{save_dir}/{resname}{fold_suffix}_selected_channels.csv",
+                                index=False,
+                            )
+                            print("Saved selected channel info to CSV.")
+                    except Exception as e:
+                        print("Warning saving selected channel names:", e)
+
+                    train_set = select_windows_with_channels(
+                        train_windows_dataset, selected_channels
+                    )
+                    valid_set = select_windows_with_channels(
+                        valid_windows_dataset, selected_channels
+                    )
+                    test_set = select_windows_with_channels(
+                        test_windows_dataset, selected_channels
+                    )
+
+                    X_train, y_train = extract_X_y_from_sample_list(train_set)
+                    X_valid, y_valid = extract_X_y_from_sample_list(valid_set)
+                    X_test, y_test = extract_X_y_from_sample_list(test_set)
+
+                    print(
+                        "Train/Valid/Test sizes:",
+                        X_train.shape[0],
+                        X_valid.shape[0],
+                        X_test.shape[0],
+                    )
+                    print(
+                        "Shapes (n_trials, n_ch_sel, n_time):",
+                        X_train.shape,
+                        X_valid.shape,
+                        X_test.shape,
+                    )
+                    print("Selected channel count used for training:", X_train.shape[1])
+
+                    X_train = X_train.astype(np.float32)
+                    X_valid = X_valid.astype(np.float32)
+                    X_test = X_test.astype(np.float32)
+                    y_train = y_train.astype(np.int64)
+                    y_valid = y_valid.astype(np.int64)
+                    y_test = y_test.astype(np.int64)
+
+                    cuda = torch.cuda.is_available()
+                    device = "cuda" if cuda else "cpu"
+                    if cuda:
+                        torch.backends.cudnn.benchmark = False
+                    set_random_seeds(seed=seed, cuda=cuda)
+
+                    n_channels = X_train.shape[1]
+                    input_window_samples = X_train.shape[2]
+                    classes = np.unique(y_train)
+                    n_classes = len(classes)
+
+                    model = build_model(
+                        model_name=args.model,
+                        n_channels=n_channels,
+                        n_classes=n_classes,
+                        n_times=input_window_samples,
+                    )
+                    print(f"Model: {args.model}")
+                    print(model)
+                    if cuda:
+                        model.cuda()
+
+                    class_weights = compute_class_weight(
+                        "balanced", classes=classes, y=y_train
+                    )
+                    class_weights = torch.FloatTensor(class_weights).to(device)
+                    criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
+
+                    valid_ds = SkorchDataset(X_valid, y_valid)
+                    callbacks = [
+                        "accuracy",
+                        (
+                            "lr_scheduler",
+                            LRScheduler(
+                                "CosineAnnealingLR", T_max=max(1, n_epochs - 1)
+                            ),
+                        ),
+                    ]
+                    if early_stopping_patience > 0:
+                        callbacks.append(
+                            (
+                                "early_stopping",
+                                EarlyStopping(
+                                    monitor=early_stopping_monitor,
+                                    patience=early_stopping_patience,
+                                    threshold=early_stopping_threshold,
+                                    lower_is_better=early_stopping_lower_is_better,
+                                ),
+                            )
+                        )
+
+                    clf = EEGClassifier(
+                        model,
+                        criterion=criterion,
+                        optimizer=torch.optim.AdamW,
+                        train_split=predefined_split(valid_ds),
+                        optimizer__lr=lr,
+                        optimizer__weight_decay=weight_decay,
+                        batch_size=batch_size,
+                        callbacks=callbacks,
+                        device=device,
+                        classes=classes,
+                        max_epochs=n_epochs,
+                    )
+
+                    print("Start training...")
+                    clf.fit(X_train, y=y_train)
+                    print("Training finished.")
+                    summarize_training_history(
+                        clf,
+                        max_epochs=n_epochs,
+                        early_stopping_patience=early_stopping_patience,
+                    )
+
+                    y_pred_test = clf.predict(X_test)
+                    test_acc = clf.score(X_test, y=y_test)
+                    print(f"Test acc: {(test_acc * 100):.2f}%")
+
+                    labels_for_cm = clf.classes_
+                    cm_test = confusion_matrix(
+                        y_test, y_pred_test, labels=labels_for_cm
+                    )
+
+                    plot_and_save(
+                        cm_test,
+                        labels_for_cm,
+                        f"Confusion Matrix (Test) - {split_name}",
+                        f"{save_dir}/{resname}{fold_suffix}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.png",
+                    )
+                    pd.DataFrame(
+                        cm_test, index=labels_for_cm, columns=labels_for_cm
+                    ).to_csv(
+                        f"{save_dir}/{resname}{fold_suffix}_{batch_size}_{n_epochs}_{top_k}_{lr}_cm_test.csv",
+                        index=True,
+                    )
+                    print("CSV 已保存到", save_dir)
+
+                    try:
+                        ch_names = raw.info.get("ch_names", None)
+                        selected_channel_names = (
+                            [ch_names[i] for i in selected_channels]
+                            if ch_names is not None
+                            else []
+                        )
                     except Exception:
-                        pass
-                gc.collect()
+                        selected_channel_names = []
+
+                    result_entry = {
+                        "subject": subject_id,
+                        "file": resname,
+                        "split_name": split_name,
+                        "fold_id": fold_id,
+                        "top_k": int(top_k_use),
+                        "n_channels_total": int(n_channels_total),
+                        "n_channels_selected": int(len(selected_channels)),
+                        "n_train": int(X_train.shape[0]),
+                        "n_valid": int(X_valid.shape[0]),
+                        "n_test": int(X_test.shape[0]),
+                        "test_acc": float(test_acc),
+                        "selected_channel_idx": selected_channels,
+                        "selected_channel_scores": [
+                            float(s) for s in channel_scores[selected_channels]
+                        ],
+                        "selected_channel_scores_norm": [
+                            float(s) for s in channel_scores_norm[selected_channels]
+                        ],
+                        "all_channel_scores": [float(s) for s in channel_scores],
+                        "all_channel_scores_norm": [
+                            float(s) for s in channel_scores_norm
+                        ],
+                        "selected_channel_names": selected_channel_names,
+                    }
+                    global_results.append(result_entry)
+
+                    del clf, model
+                    del X_train, y_train, X_valid, y_valid, X_test, y_test
+                    del train_set, valid_set, test_set
+                    del (
+                        train_windows_dataset,
+                        valid_windows_dataset,
+                        test_windows_dataset,
+                    )
+                    del rank_idx, channel_scores, selected_channels
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        try:
+                            torch.cuda.ipc_collect()
+                        except Exception:
+                            pass
+                    gc.collect()
 
             except Exception as e:
                 print(f"Error processing file {file}: {e}")
