@@ -134,6 +134,9 @@ class TrackingWeightedRandomSampler(torch.utils.data.WeightedRandomSampler):
 
 
 class SampledClassRatioLogger:
+    def initialize(self):
+        return self
+
     def get_params(self, deep=True):
         return {}
 
