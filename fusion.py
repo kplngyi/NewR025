@@ -19,7 +19,7 @@ from model_factory import build_model
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 from sklearn.model_selection import KFold, train_test_split
 from sklearn.utils import compute_class_weight
-from skorch.callbacks import EarlyStopping, LRScheduler
+from skorch.callbacks import EarlyStopping, EpochScoring, LRScheduler
 from skorch.dataset import Dataset as SkorchDataset
 from skorch.helper import predefined_split
 from runtime_utils import (
@@ -270,6 +270,8 @@ def summarize_training_history(clf, max_epochs, early_stopping_patience):
     best_epoch = None
     best_valid_loss = None
     best_valid_accuracy = None
+    best_valid_f1_macro = None
+    best_valid_balanced_accuracy = None
 
     for row in history:
         valid_loss = row.get("valid_loss")
@@ -282,6 +284,16 @@ def summarize_training_history(clf, max_epochs, early_stopping_patience):
             best_valid_accuracy = (
                 None if valid_accuracy is None else float(valid_accuracy)
             )
+            valid_f1_macro = row.get("valid_f1_macro")
+            best_valid_f1_macro = (
+                None if valid_f1_macro is None else float(valid_f1_macro)
+            )
+            valid_balanced_accuracy = row.get("valid_balanced_accuracy")
+            best_valid_balanced_accuracy = (
+                None
+                if valid_balanced_accuracy is None
+                else float(valid_balanced_accuracy)
+            )
 
     epochs_ran = len(history)
     stopped_early = early_stopping_patience > 0 and epochs_ran < max_epochs
@@ -293,6 +305,26 @@ def summarize_training_history(clf, max_epochs, early_stopping_patience):
         print(f"Best valid_loss: {best_valid_loss:.4f}")
         if best_valid_accuracy is not None:
             print(f"Best-epoch valid_accuracy: {best_valid_accuracy:.4f}")
+        if best_valid_f1_macro is not None:
+            print(f"Best-epoch valid_f1_macro: {best_valid_f1_macro:.4f}")
+        if best_valid_balanced_accuracy is not None:
+            print(
+                "Best-epoch valid_balanced_accuracy: "
+                f"{best_valid_balanced_accuracy:.4f}"
+            )
+
+
+def monitor_lower_is_better(monitor_name):
+    if monitor_name == "valid_loss":
+        return True
+    if monitor_name in {
+        "valid_accuracy",
+        "valid_acc",
+        "valid_f1_macro",
+        "valid_balanced_accuracy",
+    }:
+        return False
+    raise ValueError(f"Unsupported early_stop_monitor: {monitor_name}")
 
 
 def fisher_score_channels_from_windows_dataset(windows_dataset):
@@ -391,7 +423,7 @@ early_stopping_patience = (
 )
 early_stopping_monitor = str(config.get("early_stop_monitor", "valid_loss"))
 early_stopping_threshold = float(config.get("early_stop_threshold", 1e-4))
-early_stopping_lower_is_better = "loss" in early_stopping_monitor.lower()
+early_stopping_lower_is_better = monitor_lower_is_better(early_stopping_monitor)
 use_cross_validation = bool(config.get("use_cross_validation", False))
 cv_folds = int(config.get("cv_folds", 5))
 # ------------------ 主循环 ------------------
@@ -623,6 +655,24 @@ while top_k >= MIN_TOP_K:
                     valid_ds = SkorchDataset(X_valid, y_valid)
                     callbacks = [
                         "accuracy",
+                        (
+                            "valid_f1_macro",
+                            EpochScoring(
+                                scoring="f1_macro",
+                                lower_is_better=False,
+                                on_train=False,
+                                name="valid_f1_macro",
+                            ),
+                        ),
+                        (
+                            "valid_balanced_accuracy",
+                            EpochScoring(
+                                scoring="balanced_accuracy",
+                                lower_is_better=False,
+                                on_train=False,
+                                name="valid_balanced_accuracy",
+                            ),
+                        ),
                         (
                             "lr_scheduler",
                             LRScheduler(

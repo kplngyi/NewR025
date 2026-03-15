@@ -9,8 +9,8 @@ lr: 0.000625
 weight_decay: 0.001
 seed: 20250713
 early_stop_patience: 20
-early_stop_monitor: valid_loss
+early_stop_monitor: valid_f1_macro
 early_stop_threshold: 0.001
-use_best_model: false
+use_best_model: true
 use_cross_validation: true
 cv_folds: 5
